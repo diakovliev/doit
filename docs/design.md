@@ -399,6 +399,8 @@ Session events must be redacted and bounded before they are written. Durable dat
 - Full repository files or unbounded command output when a bounded summary is sufficient.
 - Hidden model reasoning or provider-internal traces. Only public output and opaque continuation data explicitly required for resumption may be retained.
 
+Redaction must operate on decoded JSON values and re-serialize the result; regex replacement over serialized JSON must not be used when it can invalidate escaping in file or tool content.
+
 The stored event types are:
 
 - `request`: User intent after local secret redaction.

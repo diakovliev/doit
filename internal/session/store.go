@@ -514,11 +514,31 @@ func redactAndBound(data json.RawMessage, maxBytes int) json.RawMessage {
 	if len(data) == 0 {
 		return nil
 	}
-	value := redactString(string(data))
-	if len(value) > maxBytes {
-		value = `{"truncated":true}`
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return json.RawMessage(`{"truncated":true}`)
 	}
-	return json.RawMessage(value)
+	redacted, err := json.Marshal(redactJSONValue(value))
+	if err != nil || len(redacted) > maxBytes {
+		return json.RawMessage(`{"truncated":true}`)
+	}
+	return redacted
+}
+
+func redactJSONValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return redactString(typed)
+	case []any:
+		for index := range typed {
+			typed[index] = redactJSONValue(typed[index])
+		}
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = redactJSONValue(item)
+		}
+	}
+	return value
 }
 
 func redactResult(result Result, maxBytes int) Result {

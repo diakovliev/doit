@@ -143,6 +143,7 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 | `TOOL-007` | Add explicit workspace file write and path move operations. | `TOOL-006`, `POL-001`, `DEC-005`, `DEC-007` | `fs.write` creates or explicitly overwrites bounded files, and `fs.move` moves files or directories without replacement, all through rooted workspace operations and focused tests. | `DONE` |
 | `POL-001` | Implement approval and safety policy evaluation. | `FOUND-004`, `TOOL-001`, `TOOL-002`, `TOOL-003`, `TOOL-004`, `DEC-005` | Automatic, confirmation, denied, cancelled, and non-interactive decisions are visible and tested. | `DONE` |
 | `SESSION-001` | Implement project-local session persistence. | `FOUND-006`, `DEC-006`, `DEC-007` | Manifests, ordered events, results, continuation data, locks, redaction, bounded output, atomic writes, recovery, and `--ephemeral` are tested below the effective invocation path. | `DONE` |
+| `SESSION-002` | Preserve valid JSON during session redaction. | `SESSION-001` | Redaction handles escaped strings structurally and persisted events remain valid JSON under arbitrary tool/file content. | `DONE` |
 
 ## Phase 3: Model and Orchestration
 
@@ -209,6 +210,7 @@ Deferred work must not change the approval, observability, token accounting, ses
 | 2026-09-12 | `CONTEXT-002` | Added deterministic bounded loading for repository instructions and skills, including `.doit/instructions*` and `.doit/skills/*/SKILL.md`, while excluding other `.doit` state. | Repository validation matrix |
 | 2026-09-12 | `AGENT-002` | Started repairing resumed Responses history after provider rejection of orphaned function-call outputs; budget trimming now needs atomic call/output handling and legacy history sanitization. | Focused agent/context tests pending |
 | 2026-09-12 | `AGENT-002` | Preserved function-call/output pairs during budget trimming and sanitized orphaned or incomplete tool items from resumed sessions. | Repository validation matrix |
+| 2026-09-12 | `SESSION-002` | Reworked event redaction to decode and redact JSON values structurally, preventing quoted or backslash-containing tool output from corrupting session event JSON. | Repository validation matrix |
 | 2026-09-12 | `TOOL-006` | Started structured workspace directory operations for explicit mkdir and remove actions; rooted APIs keep paths inside the workspace. | Focused workspacefs tests pending |
 | 2026-09-12 | `TOOL-006` | Added model-facing `fs.mkdir` and `fs.remove` with rooted confinement, recursive controls, protected workspace/Git paths, and fixture coverage. | Repository validation matrix |
 | 2026-09-12 | `TOOL-007` | Started explicit arbitrary workspace file creation/overwrite and file-or-directory move operations. | Focused workspacefs tests pending |

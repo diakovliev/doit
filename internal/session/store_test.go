@@ -151,6 +151,27 @@ func TestLatestAndResumePreserveSessionHistory(t *testing.T) {
 	assertResumedSession(t, record)
 }
 
+func TestAppendPreservesEscapedJSONWhileRedacting(t *testing.T) {
+	root := t.TempDir()
+	store := newStore(t, root, true)
+	defer func() { _ = store.Close() }()
+	id := startTestSession(t, store, root)
+	data, err := json.Marshal(map[string]string{"content": "token=secret\"quoted\\path"})
+	if err != nil {
+		t.Fatalf("marshal escaped event: %v", err)
+	}
+	if err := store.Append(context.Background(), id, Event{Type: "tool_result", Data: data}); err != nil {
+		t.Fatalf("append escaped event: %v", err)
+	}
+	record, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatalf("load escaped event: %v", err)
+	}
+	if len(record.Events) != 1 || !json.Valid(record.Events[0].Data) || bytes.Contains(record.Events[0].Data, []byte("secret")) {
+		t.Fatalf("escaped event was not safely redacted: %s", record.Events[0].Data)
+	}
+}
+
 func newPersistentStore(t *testing.T) (string, *FileStore) {
 	t.Helper()
 	root := t.TempDir()
