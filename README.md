@@ -4,6 +4,22 @@
 
 The project is designed for OpenAI Responses-compatible backends, including Microsoft Foundry deployments, Ollama-compatible local servers, gateways, and other hosted services.
 
+## Installation
+
+Install the `doit` binary with:
+
+```bash
+go install github.com/diakovliev/doit@latest
+```
+
+Then run:
+
+```bash
+doit --help
+doit --version
+doit version
+```
+
 ## Current Status
 
 The current vertical slice supports:
