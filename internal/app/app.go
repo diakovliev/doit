@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -94,7 +93,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	if err := registerDevelopmentTasks(processService); err != nil {
+	if err := registerConfiguredTasks(processService, configuration.Tasks); err != nil {
 		return runtimeDependencies{}, err
 	}
 	gitService, err := gitinspect.New(configuration.Workspace)
@@ -209,20 +208,9 @@ func ephemeralOverride(invocation cli.Invocation) *bool {
 	return &value
 }
 
-func registerDevelopmentTasks(runner *processrunner.Runner) error {
-	tasks := []processrunner.Definition{
-		{Name: "test", Executable: "go", Arguments: []string{"test", "./..."}},
-		{Name: "vet", Executable: "go", Arguments: []string{"vet", "./..."}},
-		{Name: "format", Executable: "gofmt", Arguments: []string{"-w"}},
-		{Name: "format-check", Executable: "gofmt", Arguments: []string{"-l"}},
-		{Name: "lint", Executable: "golangci-lint", Arguments: []string{"run"}},
-		{Name: "security", Executable: "gosec", Arguments: []string{"./..."}},
-	}
-	for _, task := range tasks {
-		if _, err := exec.LookPath(task.Executable); err != nil {
-			continue
-		}
-		if err := runner.Register(task); err != nil {
+func registerConfiguredTasks(runner *processrunner.Runner, tasks map[string]config.TaskConfig) error {
+	for name, task := range tasks {
+		if err := runner.Register(processrunner.Definition{Name: name, Executable: task.Executable, Arguments: task.Arguments, Environment: task.Environment}); err != nil {
 			return err
 		}
 	}

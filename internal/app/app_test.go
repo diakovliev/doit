@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/diakovliev/doit/internal/cli"
+	"github.com/diakovliev/doit/internal/config"
 	"github.com/diakovliev/doit/internal/policy"
 	"github.com/diakovliev/doit/internal/process"
 	"github.com/diakovliev/doit/internal/processrunner"
@@ -61,36 +62,21 @@ func TestPromptApprovalAcceptsExplicitYes(t *testing.T) {
 	}
 }
 
-func TestDevelopmentTasksFormatGoFile(t *testing.T) {
-	if _, err := exec.LookPath("gofmt"); err != nil {
-		t.Skip("gofmt is not installed")
+func TestConfiguredTaskRuns(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
 	}
 	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "format.go"), []byte("package p\nfunc f(){}\n"), 0600); err != nil {
-		t.Fatalf("write format fixture: %v", err)
-	}
 	runner, err := processrunner.New(workspace, 1024)
 	if err != nil {
 		t.Fatalf("new process runner: %v", err)
 	}
-	if err := registerDevelopmentTasks(runner); err != nil {
-		t.Fatalf("register development tasks: %v", err)
+	if err := registerConfiguredTasks(runner, map[string]config.TaskConfig{"probe": {Executable: "git", Arguments: []string{"--version"}}}); err != nil {
+		t.Fatalf("register configured tasks: %v", err)
 	}
-	result, err := runner.Run(context.Background(), process.Task{Name: "format", Arguments: []string{"format.go"}})
+	result, err := runner.Run(context.Background(), process.Task{Name: "probe"})
 	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("format task failed: result=%+v error=%v", result, err)
-	}
-	root, err := os.OpenRoot(workspace)
-	if err != nil {
-		t.Fatalf("open formatted workspace: %v", err)
-	}
-	contents, err := root.ReadFile("format.go")
-	_ = root.Close()
-	if err != nil {
-		t.Fatalf("read formatted fixture: %v", err)
-	}
-	if string(contents) != "package p\n\nfunc f() {}\n" {
-		t.Fatalf("unexpected formatted content: %q", contents)
+		t.Fatalf("configured task failed: result=%+v error=%v", result, err)
 	}
 }
 
@@ -104,8 +90,8 @@ func TestBuildRegistryExposesGitAndProcessAutomationTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new process runner: %v", err)
 	}
-	if err := registerDevelopmentTasks(processService); err != nil {
-		t.Fatalf("register development tasks: %v", err)
+	if err := registerConfiguredTasks(processService, map[string]config.TaskConfig{"probe": {Executable: "git", Arguments: []string{"--version"}}}); err != nil {
+		t.Fatalf("register configured tasks: %v", err)
 	}
 	registry, err := buildRegistry(workspace, filesystem, processService)
 	if err != nil {
