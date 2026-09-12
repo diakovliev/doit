@@ -1,6 +1,6 @@
 # doit
 
-`doit` is a Go command-line workspace assistant for AI-assisted development, code review, and testing. It combines a model backend with bounded repository context and controlled local tools.
+`doit` is a command-line workspace assistant for AI-assisted development, code review, and testing. It combines a model backend with bounded repository context and controlled local tools.
 
 The project is designed for OpenAI Responses-compatible backends, including Microsoft Foundry deployments, Ollama-compatible local servers, gateways, and other hosted services.
 
@@ -28,48 +28,48 @@ See the project documents for the full direction and implementation status:
 
 ## Requirements
 
-- Go `1.27.1` or a compatible newer Go toolchain
+- A supported build environment for the `doit` binary
 - An OpenAI Responses-compatible model endpoint
 - A configured model identifier
 - A credential supplied through an environment variable when the backend requires authentication
 
-The root package is intentionally thin. The application behavior lives under `internal/` packages.
+The root package is intentionally thin. The application behavior lives under `internal/` packages. Repository validation and formatting are configured per workspace rather than tied to a particular programming language.
 
 ## Quick Start
 
 Show the CLI help and version:
 
 ```powershell
-go run . --help
-go run . --version
-go run . version
+doit --help
+doit --version
+doit version
 ```
 
 Global options must appear before the command:
 
 ```powershell
-go run . --profile ollama --timeout 5m run "Explain this repository"
+doit --profile ollama --timeout 5m run "Explain this repository"
 ```
 
 Run a request without a positional prompt by piping text through stdin:
 
 ```powershell
-"Explain the current implementation and list the main packages." | go run . --profile ollama run
+"Explain the current implementation and list the main packages." | doit --profile ollama run
 ```
 
 Use an ephemeral session when you do not want `.doit/sessions/` data written:
 
 ```powershell
-go run . --profile ollama --ephemeral --timeout 5m run "Inspect the repository without modifying files."
+doit --profile ollama --ephemeral --timeout 5m run "Inspect the repository without modifying files."
 ```
 
 Use JSON output for scripts:
 
 ```powershell
-go run . --profile ollama --format json --ephemeral run "Summarize the repository."
+doit --profile ollama --format json --ephemeral run "Summarize the repository."
 ```
 
-For a built binary, replace `go run .` with `doit`:
+For an installed executable, use `doit`:
 
 ```powershell
 doit --profile ollama --ephemeral run "Summarize the repository."
@@ -100,7 +100,7 @@ The following names are recognized for future workflow implementations: `develop
 | --- | --- | --- |
 | `-C, --directory <path>` | Use another workspace directory. | `doit -C .\sample --profile ollama run "Inspect this project"` |
 | `-p, --profile <name>` | Select a named backend profile. | `doit --profile foundry_deepseek run "Review the code"` |
-| `-m, --model <id>` | Override the profile's model identifier. | `doit --profile ollama --model phi4-mini:latest run "Explain main.go"` |
+| `-m, --model <id>` | Override the profile's model identifier. | `doit --profile ollama --model <model-id> run "Explain the project entrypoint"` |
 | `--format human` | Print progress and a human result. | `doit --format human run "Summarize"` |
 | `--format json` | Print one machine-readable result object. | `doit --format json run "Summarize"` |
 | `--ephemeral` | Keep the session in memory and do not persist it. | `doit --ephemeral run "Inspect only"` |
@@ -160,7 +160,7 @@ Set the credential only in the current shell. Never commit it, put it in a READM
 
 ```powershell
 $env:DOIT_FOUNDRY_API_KEY = "<rotated-key>"
-go run . --profile foundry_deepseek --ephemeral --timeout 10m run "Inspect this repository. Do not modify files."
+doit --profile foundry_deepseek --ephemeral --timeout 10m run "Inspect this repository. Do not modify files."
 ```
 
 Environment overrides include:
@@ -190,7 +190,7 @@ docker exec -it doit-ollama ollama pull <tool-capable-model>
 Configure the endpoint as `http://127.0.0.1:11434/v1`, then run:
 
 ```powershell
-go run . --profile ollama --ephemeral --timeout 10m run "Inspect main.go and summarize it. Do not modify files."
+doit --profile ollama --ephemeral --timeout 10m run "Inspect the project entrypoint and summarize it. Do not modify files."
 ```
 
 A model may answer normal text requests while still failing tool workflows. Coding tasks that require filesystem or process tools need a model/backend that emits Responses `function_call` items rather than prose that merely describes a hypothetical tool call.
@@ -216,13 +216,13 @@ The adapter uses the OpenAI-compatible Foundry endpoint directly:
 
 ```powershell
 $env:DOIT_FOUNDRY_API_KEY = "<rotated-key>"
-go run . --profile foundry_deepseek --ephemeral --timeout 10m run "Inspect this repository and summarize the current implementation. Do not modify files."
+doit --profile foundry_deepseek --ephemeral --timeout 10m run "Inspect this repository and summarize the current implementation. Do not modify files."
 ```
 
 For a higher-throughput profile, use the model deployment configured in your project:
 
 ```powershell
-go run . --profile foundry_gpt --ephemeral --timeout 10m run "Review the Go package structure. Do not modify files."
+doit --profile foundry_gpt --ephemeral --timeout 10m run "Review the project structure. Do not modify files."
 ```
 
 The example Foundry profile is limited to `20,000` tokens per minute and `20 requests per minute`. The rate limiter uses the profile's `tokens_per_minute` and `requests_per_minute` values. On HTTP 429 responses it honors `Retry-After`, then uses bounded exponential backoff with jitter. An exhausted throttle returns a distinct rate-limit error.
@@ -294,9 +294,20 @@ Code and validation:
 - `code.format`
 - `process.run`
 
-The built-in `code.format` task is named `format` and runs `gofmt -w`. Pass workspace-relative Go files in `arguments`, such as `["main.go"]`. Use `format-check` with the same file arguments to list files that need formatting without changing them.
+`code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
 
-`process.run` accepts a configured task name, not an executable or shell command. The model-facing schema advertises the tasks available in the current environment, typically `test`, `vet`, `format`, `format-check`, `lint`, and `security`; pass extra arguments through `args`, for example `{"task":"test","args":[]}`. Providers that reject dotted tool names see this tool as `process_run`, which is mapped back to `process.run` before execution.
+`process.run` accepts a configured task name, not an executable or shell command. Define repository tasks in `.doit/config.json` or another selected configuration file:
+
+```json
+{
+  "tasks": {
+    "check": {"executable": "<test-runner>", "arguments": ["<project-arguments>"]},
+    "format": {"executable": "<formatter>", "arguments": ["<project-arguments>"]}
+  }
+}
+```
+
+The model-facing schema advertises the tasks available in the current workspace. Providers that reject dotted tool names see this tool as `process_run`, which is mapped back to `process.run` before execution.
 
 The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
@@ -342,17 +353,7 @@ Use `--ephemeral` for experiments or sensitive requests that should not persist 
 
 ## Development
 
-Format and validate the repository with:
-
-```powershell
-gofmt -w main.go internal
-go test ./...
-go vet ./...
-golangci-lint run
-gosec ./...
-```
-
-The implementation sequence and acceptance criteria are tracked in [docs/implementation-plan.md](docs/implementation-plan.md).
+Configure repository-specific validation tasks under `.doit/config.json`, then run them through the structured `process.run` tool. The implementation sequence and acceptance criteria are tracked in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Security Notes
 

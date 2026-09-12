@@ -295,7 +295,7 @@ A normalized result has this conceptual shape:
 }
 ```
 
-The actual Go types may differ, but the status distinction and bounded diagnostics are part of the tool contract. A denied action is not an empty successful result.
+The actual implementation types may differ, but the status distinction and bounded diagnostics are part of the tool contract. A denied action is not an empty successful result.
 
 #### Required MVP Toolset
 
@@ -318,7 +318,7 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 - `code.check_patch`: Validate a unified patch without changing files and return the affected paths and conflicts.
 - `code.apply_patch`: Create, update, or delete files from a validated patch. It must support preview, atomic per-file replacement, expected-content hashes, and conflict failure.
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
-- `code.format`: Run a named, configured formatter and return its bounded result. The built-in `format` task runs `gofmt -w` on explicit workspace-relative Go file arguments; `format-check` runs `gofmt -l` without changing files. It must not accept an arbitrary executable or unbounded argument string.
+- `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
 All code writes must produce a diff or changed-path summary before completion. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch.
 
@@ -336,7 +336,7 @@ Git inspection must report the repository root when it differs from the effectiv
 
 **Validation and development processes** use an allowlisted runner:
 
-- `process.run`: Execute a named configured task such as `test`, `format-check`, `lint`, `vet`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
+- `process.run`: Execute a named repository-configured task such as `check`, `format`, `lint`, `analyze`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
 
 The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
 
@@ -469,7 +469,7 @@ Configuration should have predictable precedence:
 3. User configuration.
 4. Environment variables and command-line flags for explicit overrides.
 
-Configuration should cover the workspace path, backend profile, model identifier, approval policy, command allowlist, timeouts, output limits, and session storage. Session configuration should contain:
+Configuration should cover the workspace path, backend profile, model identifier, approval policy, repository task allowlist, timeouts, output limits, and session storage. Repository tasks are named entries with an executable, argument array, and optional environment allowlist; they are the only process actions exposed to the model. Session configuration should contain:
 
 - Whether persistence is durable or ephemeral for the current invocation.
 - Retention and pruning settings for `.doit/sessions/`.
@@ -518,7 +518,7 @@ The configuration format should support multiple named backend profiles and a se
 - Avoid rescanning unchanged files within one task.
 - Keep expensive operations behind explicit tools so the agent can choose when they are necessary.
 
-## 8. Go Package Direction
+## 8. Package Direction
 
 The current repository has a single entrypoint. As implementation begins, package boundaries should follow responsibilities rather than anticipated features:
 
@@ -586,7 +586,7 @@ Phase 0 decisions are frozen in the [implementation plan](implementation-plan.md
 - Which secret and sensitive-data redaction rules should be enabled by default, and how should users review a redacted session before export?
 - Should an explicitly configured alternate local session path be supported after the MVP?
 - Which additional operating systems and shells should be supported after the Windows-first MVP?
-- Should tool extensions be an in-process Go API, an external process protocol, or remain internal until usage justifies an extension model?
+- Should tool extensions be an in-process API, an external process protocol, or remain internal until usage justifies an extension model?
 
 Until these decisions are resolved, implementations should prefer small interfaces and local behavior that can be replaced without changing the user-facing workflow.
 
@@ -614,7 +614,7 @@ The scenario must work without real credentials or network access. It is the min
 
 - **API baseline:** Require core non-streaming text responses and function calling. Treat streaming as an early implementation goal, but retain non-streaming fallback for compatible backends that do not stream.
 - **Configuration:** Choose the configuration format, exact file locations, environment variable names, backend profile shape, and precedence between flags, environment, project configuration, and user configuration.
-- **Go contracts:** Define the initial interfaces and wire types for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`, including error and cancellation behavior.
+- **Core contracts:** Define the initial interfaces and wire types for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`, including error and cancellation behavior.
 - **Tool schemas:** Freeze the argument and result schemas for `fs.read`, `fs.search`, `code.apply_patch`, `git.status`, `git.diff`, and `process.run` before implementing the orchestrator.
 - **Approval policy:** Define which tools are automatic, confirmation-based, or rejected by default. The recommended baseline is automatic read-only inspection, confirmation for writes, and rejection of arbitrary shell and remote Git operations.
 - **Token accounting:** Select the tokenizer or estimation strategy, define input/output/session budgets, and specify how retries and missing provider usage are represented.

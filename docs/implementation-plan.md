@@ -28,7 +28,7 @@ The Phase 1 MVP is complete when:
 - Input, output, and total token counters are emitted for every model request and aggregated into the session result.
 - Durable session data is redacted, bounded, recoverable, and stored under `.doit/sessions/` below the effective invocation path.
 - Read-only Git status and diff inspection works without arbitrary Git command composition.
-- Required tests, `go vet`, `golangci-lint`, and `gosec` pass.
+- Repository-configured tests, formatting, lint, and security checks pass.
 
 ## Phase 0: Decision Freeze
 
@@ -38,7 +38,7 @@ These decisions must be resolved before the corresponding implementation task st
 | --- | --- | --- | --- | --- |
 | `DEC-001` | Freeze the core OpenAI Responses compatibility level: non-streaming text plus function calling; decide whether streaming is a Phase 1 requirement. | A short compatibility checklist names required and optional fields and fallback behavior. | None | `DONE` |
 | `DEC-002` | Freeze configuration format, locations, precedence, profile names, and environment variable names. | Example configuration and precedence table are committed to the docs. | None | `DONE` |
-| `DEC-003` | Freeze Go contracts for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`. | Interfaces include cancellation, errors, normalized results, and usage fields. | `DEC-001` | `DONE` |
+| `DEC-003` | Freeze core contracts for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`. | Interfaces include cancellation, errors, normalized results, and usage fields. | `DEC-001` | `DONE` |
 | `DEC-004` | Freeze the initial argument and result schemas for `fs.read`, `fs.search`, `code.apply_patch`, `git.status`, `git.diff`, and `process.run`. | Each tool has a schema test or fixture request and a documented risk class. | `DEC-003` | `DONE` |
 | `DEC-005` | Freeze automatic, confirmation-based, and rejected actions. | Approval matrix covers filesystem writes, process tasks, Git writes, remote access, and non-interactive mode. | `DEC-004` | `DONE` |
 | `DEC-006` | Freeze token counting and budget behavior, including provider usage, local estimates, unknown values, and retries. | Usage examples show per-request and cumulative session accounting. | `DEC-001`, `DEC-003` | `DONE` |
@@ -58,13 +58,13 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 #### `DEC-002` Configuration
 
-- Configuration uses JSON to keep the initial implementation dependency-light and directly supported by the Go standard library.
+- Configuration uses JSON to keep the initial implementation dependency-light and directly supported by the standard library. Project configuration may define named process tasks with executables, argument arrays, and optional environments; no language-specific tasks are built in.
 - Project configuration is a non-secret `.doit/config.json` below the effective invocation path. User configuration lives in the operating-system user configuration directory under `doit/config.json`.
 - Precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, then command-line flags.
 - `DOIT_CONFIG_FILE` may select an explicit configuration file. `DOIT_PROFILE`, `DOIT_MODEL`, and `DOIT_API_ROOT` are supported direct overrides.
 - Credentials are referenced by environment-variable name or operating-system credential reference; raw tokens are not stored in configuration files.
 
-#### `DEC-003` Go Contracts
+#### `DEC-003` Core Contracts
 
 - `ModelClient` accepts `context.Context` and normalized model requests, returning normalized responses or categorized errors.
 - `Tool` exposes a stable name, JSON schema, risk class, limits, and a cancellation-aware execution method.
@@ -108,8 +108,8 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 #### `DEC-008` Platform Contract
 
-- Phase 1 is validated on Windows 10/11 with PowerShell 5.1 or later and `pwsh` 7 or later. The Go APIs avoid shell-specific quoting so later POSIX support remains possible.
-- Paths use Go's platform-aware path handling. Process tasks use configured argument arrays rather than shell command strings.
+- Phase 1 is validated on Windows 10/11 with PowerShell 5.1 or later and `pwsh` 7 or later. The implementation avoids shell-specific quoting so later POSIX support remains possible.
+- Paths use platform-aware path handling. Process tasks use configured argument arrays rather than shell command strings.
 - Process cancellation is context-driven with bounded output, bounded duration, and an allowlisted environment.
 
 #### `DEC-009` Fake Backend Scenarios
@@ -122,12 +122,13 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
-| `FOUND-001` | Establish the Go package layout and core error types. | `DEC-003` | Packages have clear ownership, errors preserve cause and category, and the empty application still builds. | `DONE` |
+| `FOUND-001` | Establish the package layout and core error types. | `DEC-003` | Packages have clear ownership, errors preserve cause and category, and the empty application still builds. | `DONE` |
 | `FOUND-002` | Implement configuration loading and backend profiles. | `DEC-002` | Defaults, file configuration, environment overrides, flags, credential references, and validation are tested. | `DONE` |
 | `FOUND-003` | Implement the CLI root, global options, help, version, command dispatch, and stable exit codes. | `DEC-002`, `DEC-008` | `doit`, `doit run`, `doit agent`, `--format`, `--directory`, `--profile`, `--ephemeral`, and invalid-input paths behave as documented. | `DONE` |
 | `FOUND-004` | Implement the normalized tool contract and registry. | `DEC-003`, `DEC-004` | Tools register schemas, risk classes, limits, cancellation behavior, and normalized results. | `DONE` |
 | `FOUND-005` | Implement deterministic fake model and process clients. | `DEC-003`, `DEC-009` | Unit and integration tests can run model/tool loops without credentials or network access. | `DONE` |
 | `FOUND-006` | Implement token accounting primitives. | `DEC-006` | Every request creates usage counters, provider usage reconciles estimates, and cumulative totals are testable; streaming-specific accounting is deferred to `MODEL-002`. | `DONE` |
+| `FOUND-007` | Make process tasks repository-configured and language-neutral. | `FOUND-002`, `TOOL-003` | Project configuration defines allowlisted executables, arguments, and environments; runtime registration assumes no compiler, formatter, linter, or security scanner. | `DONE` |
 
 ## Phase 2: Local Tools and Persistence
 
@@ -135,7 +136,7 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 | --- | --- | --- | --- | --- |
 | `TOOL-001` | Implement bounded filesystem inspection. | `FOUND-004`, `DEC-004`, `DEC-007` | `fs.list`, `fs.stat`, `fs.read`, `fs.search`, and `fs.hash` enforce workspace, ignore, symlink, size, and cancellation rules. | `DONE` |
 | `TOOL-002` | Implement structured Git inspection. | `TOOL-001`, `DEC-007` | `git.root`, `git.status`, `git.diff`, `git.log`, `git.show`, `git.blame`, and `git.check_ignore` return structured fixture results and refuse unsupported scope. | `DONE` |
-| `TOOL-003` | Implement the allowlisted process runner. | `FOUND-004`, `DEC-005`, `DEC-008` | Named test, format, lint, security, vet, and build tasks enforce arguments, environment, working directory, timeout, cancellation, and output limits. | `DONE` |
+| `TOOL-003` | Implement the allowlisted process runner. | `FOUND-004`, `DEC-005`, `DEC-008` | Repository-configured check, format, lint, analysis, security, and build tasks enforce arguments, environment, working directory, timeout, cancellation, and output limits without assuming a programming language. | `DONE` |
 | `TOOL-004` | Implement patch validation, preview, application, rename, and formatter integration. | `TOOL-001`, `TOOL-003`, `DEC-004`, `DEC-005` | `code.check_patch`, `code.apply_patch`, `code.rename`, and `code.format` detect conflicts, produce diffs, use atomic writes, and never bypass approval. | `DONE` |
 | `TOOL-005` | Add structured workspace-scoped local Git mutations. | `TOOL-002`, `POL-001`, `DEC-005`, `DEC-007` | `git.stage`, `git.unstage`, `git.commit`, and `git.restore` enforce path scope, approval, staged-path selection, bounded messages, and no remote or arbitrary command execution. | `DONE` |
 | `TOOL-006` | Add structured workspace directory operations. | `TOOL-001`, `POL-001`, `DEC-005`, `DEC-007` | `fs.mkdir` and `fs.remove` create or remove explicit workspace paths with rooted confinement, root and `.git` protection, recursive controls, approval metadata, and focused tests. | `DONE` |
@@ -165,7 +166,7 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 | `WORK-001` | Add dedicated `develop`, `review`, and `test` workflows. | `MVP-001`, `HARD-001` | Each workflow has focused context selection, output, validation, and exit-status tests. | `TODO` |
 | `WORK-002` | Add session resume, export, pruning, and recovery commands. | `SESSION-001`, `MVP-001` | Interrupted and completed sessions can be safely inspected, resumed, exported, and pruned under the documented policy. | `IN PROGRESS` |
 | `WORK-002A` | Reuse the latest durable session automatically. | `SESSION-001`, `MVP-001` | Subsequent runs reuse the newest non-active resumable workspace session, replay bounded public turns, and support explicit fresh-session opt-outs. | `DONE` |
-| `WORK-003` | Add CI for the repository's required checks. | `HARD-001` | CI runs tests, vet, lint, gosec, deterministic integration tests, and platform-specific checks without live model credentials. | `TODO` |
+| `WORK-003` | Add CI for the repository's required checks. | `HARD-001` | CI runs configured tests, formatting, lint, security, deterministic integration tests, and platform-specific checks without live model credentials. | `TODO` |
 
 ## Deferred Work
 
@@ -187,28 +188,30 @@ Deferred work must not change the approval, observability, token accounting, ses
 | --- | --- | --- | --- |
 | 2026-09-12 | `PLAN-001` | Created the initial trackable implementation plan from the project design. | This document |
 | 2026-09-12 | `DEC-001`-`DEC-009` | Frozen the Safe Local MVP compatibility, configuration, contracts, tool schemas, approvals, token accounting, Git scope, platform, and fake-backend decisions. | [Phase 0 Decision Record](#phase-0-decision-record); [design open decisions](design.md#11-open-decisions) |
-| 2026-09-12 | `FOUND-001`-`FOUND-006` | Implemented the Phase 1 Foundation packages, CLI shell, configuration loader, tool and policy contracts, fake clients, session contracts, and token accounting. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-001`-`TOOL-004`, `POL-001`, `SESSION-001` | Implemented bounded filesystem and Git inspection, allowlisted process execution, reviewable code operations, approval coverage, and persistent/ephemeral sessions. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `MODEL-001`, `CONTEXT-001`, `AGENT-001`, `CLI-001`, `MVP-001` | Implemented the Responses HTTP adapter, bounded context builder, model/tool orchestration, stdin-aware CLI composition, process validation tool, and deterministic end-to-end CLI vertical slice. `MODEL-002` remains deferred by `DEC-001`. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `RUN-001` | Validated the local Docker Ollama backend at `http://127.0.0.1:11434/v1` with `phi4-mini:latest`; simple `doit run` completed successfully, while installed models rejected tool calls or produced simulated tool prose. | Ollama Responses probe; `go run . --ephemeral --timeout 5m run "Reply with exactly: hello"`; tool-call trials with `phi4-mini`, `phi4-mini-reasoning`, and `deepseek-coder-v2` |
-| 2026-09-12 | `RUN-003` | Added bounded Foundry rate-limit retries with `Retry-After` support, jittered backoff, minimum request pacing, and distinct exhausted-throttle errors. | `go test ./internal/modelhttp`; full repository validation |
-| 2026-09-12 | `CLI-001` | Wired explicit interactive approval prompts for `doit agent`; `doit run` and JSON mode remain non-interactive and deny confirmation-required tools. | `go test ./internal/app ./internal/agent`; full repository validation |
-| 2026-09-12 | `AUTO-001` | Made `doit run` explicit workspace automation: local write/process/destructive tools can execute without prompts, while path escapes, network access, remote operations, and rejected-risk tools remain denied. | `go test ./internal/policy ./internal/agent ./internal/app`; full repository validation |
-| 2026-09-12 | `TOOL-004` | Hardened code-operation outcomes so patch previews and applications report actual content changes, identical writes are skipped, and the built-in formatter exposes explicit `format` and `format-check` tasks. | `go test ./internal/codetools ./internal/app`; full repository validation |
-| 2026-09-12 | `CLI-001` | Clarified root entrypoint integration by extracting `os.Args[1:]` once and wiring a named application handler. | `go test .`; full repository validation |
-| 2026-09-12 | `WORK-002A` | Implemented automatic durable-session reuse: subsequent runs select the newest non-active resumable session in the effective workspace by default, replay bounded public turns, and support `--new-session`, `--no-resume`, and `--ephemeral` opt-outs. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...`; `git diff --check` |
-| 2026-09-12 | `TOOL-003`, `CLI-001` | Published the configured process-task enum and structured schema to model calls, improved unknown-task diagnostics, and replaced the placeholder entrypoint test with root CLI argument/exit-code coverage. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-003` | Made process deadlines model-selectable with human-readable duration strings, a 10-minute per-process cap, and caller-controlled outer cancellation. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-005` | Implemented structured local Git automation for staging, unstaging, committing selected staged paths, and restoring selected paths; remote and arbitrary Git operations remain excluded. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-003`, `TOOL-005` | Made registered validation task names explicit in the process schema and added production-registry coverage for Git inspection, Git mutation, and process automation tools. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-005` | Made `git.commit` atomically stage its explicit path group before verifying and committing it, eliminating cross-tool staging-state failures in multi-commit automation. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `TOOL-005` | Added fresh changed-path diagnostics when a commit selection is clean and staged-path reporting for `git.stage`, covering stale model path selections. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
-| 2026-09-12 | `CONTEXT-001`, `TOOL-005` | Added fresh Git status to every new model context so automatic session reuse cannot silently drive commit grouping from stale conversation paths. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `FOUND-001`-`FOUND-006` | Implemented the Phase 1 Foundation packages, CLI shell, configuration loader, tool and policy contracts, fake clients, session contracts, and token accounting. | Repository validation matrix |
+| 2026-09-12 | `TOOL-001`-`TOOL-004`, `POL-001`, `SESSION-001` | Implemented bounded filesystem and Git inspection, allowlisted process execution, reviewable code operations, approval coverage, and persistent/ephemeral sessions. | Repository validation matrix |
+| 2026-09-12 | `MODEL-001`, `CONTEXT-001`, `AGENT-001`, `CLI-001`, `MVP-001` | Implemented the Responses HTTP adapter, bounded context builder, model/tool orchestration, stdin-aware CLI composition, process validation tool, and deterministic end-to-end CLI vertical slice. `MODEL-002` remains deferred by `DEC-001`. | Repository validation matrix |
+| 2026-09-12 | `RUN-001` | Validated a local Ollama-compatible backend; simple requests completed successfully, while some installed models rejected tool calls or produced simulated tool prose. | Ollama Responses probe; local backend trials |
+| 2026-09-12 | `RUN-003` | Added bounded Foundry rate-limit retries with `Retry-After` support, jittered backoff, minimum request pacing, and distinct exhausted-throttle errors. | Repository validation matrix |
+| 2026-09-12 | `CLI-001` | Wired explicit interactive approval prompts for `doit agent`; `doit run` and JSON mode remain non-interactive and deny confirmation-required tools. | Repository validation matrix |
+| 2026-09-12 | `AUTO-001` | Made `doit run` explicit workspace automation: local write/process/destructive tools can execute without prompts, while path escapes, network access, remote operations, and rejected-risk tools remain denied. | Repository validation matrix |
+| 2026-09-12 | `TOOL-004` | Hardened code-operation outcomes so patch previews and applications report actual content changes, identical writes are skipped, and configured format tasks are exposed. | Repository validation matrix |
+| 2026-09-12 | `CLI-001` | Clarified root entrypoint integration by extracting process arguments once and wiring a named application handler. | Repository validation matrix |
+| 2026-09-12 | `WORK-002A` | Implemented automatic durable-session reuse: subsequent runs select the newest non-active resumable session in the effective workspace by default, replay bounded public turns, and support `--new-session`, `--no-resume`, and `--ephemeral` opt-outs. | Repository validation matrix |
+| 2026-09-12 | `TOOL-003`, `CLI-001` | Published the configured process-task enum and structured schema to model calls, improved unknown-task diagnostics, and replaced the placeholder entrypoint test with root CLI argument/exit-code coverage. | Repository validation matrix |
+| 2026-09-12 | `TOOL-003` | Made process deadlines model-selectable with human-readable duration strings, a 10-minute per-process cap, and caller-controlled outer cancellation. | Repository validation matrix |
+| 2026-09-12 | `TOOL-005` | Implemented structured local Git automation for staging, unstaging, committing selected staged paths, and restoring selected paths; remote and arbitrary Git operations remain excluded. | Repository validation matrix |
+| 2026-09-12 | `TOOL-003`, `TOOL-005` | Made registered validation task names explicit in the process schema and added production-registry coverage for Git inspection, Git mutation, and process automation tools. | Repository validation matrix |
+| 2026-09-12 | `TOOL-005` | Made `git.commit` atomically stage its explicit path group before verifying and committing it, eliminating cross-tool staging-state failures in multi-commit automation. | Repository validation matrix |
+| 2026-09-12 | `TOOL-005` | Added fresh changed-path diagnostics when a commit selection is clean and staged-path reporting for `git.stage`, covering stale model path selections. | Repository validation matrix |
+| 2026-09-12 | `CONTEXT-001`, `TOOL-005` | Added fresh Git status to every new model context so automatic session reuse cannot silently drive commit grouping from stale conversation paths. | Repository validation matrix |
 | 2026-09-12 | `CONTEXT-002` | Started bounded repository guidance discovery for existing `.github` conventions and opt-in `.doit` instructions/skills. | Focused context tests pending |
-| 2026-09-12 | `CONTEXT-002` | Added deterministic bounded loading for repository instructions and skills, including `.doit/instructions*` and `.doit/skills/*/SKILL.md`, while excluding other `.doit` state. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `CONTEXT-002` | Added deterministic bounded loading for repository instructions and skills, including `.doit/instructions*` and `.doit/skills/*/SKILL.md`, while excluding other `.doit` state. | Repository validation matrix |
 | 2026-09-12 | `AGENT-002` | Started repairing resumed Responses history after provider rejection of orphaned function-call outputs; budget trimming now needs atomic call/output handling and legacy history sanitization. | Focused agent/context tests pending |
-| 2026-09-12 | `AGENT-002` | Preserved function-call/output pairs during budget trimming and sanitized orphaned or incomplete tool items from resumed sessions. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `AGENT-002` | Preserved function-call/output pairs during budget trimming and sanitized orphaned or incomplete tool items from resumed sessions. | Repository validation matrix |
 | 2026-09-12 | `TOOL-006` | Started structured workspace directory operations for explicit mkdir and remove actions; rooted APIs keep paths inside the workspace. | Focused workspacefs tests pending |
-| 2026-09-12 | `TOOL-006` | Added model-facing `fs.mkdir` and `fs.remove` with rooted confinement, recursive controls, protected workspace/Git paths, and fixture coverage. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `TOOL-006` | Added model-facing `fs.mkdir` and `fs.remove` with rooted confinement, recursive controls, protected workspace/Git paths, and fixture coverage. | Repository validation matrix |
 | 2026-09-12 | `TOOL-007` | Started explicit arbitrary workspace file creation/overwrite and file-or-directory move operations. | Focused workspacefs tests pending |
-| 2026-09-12 | `TOOL-007` | Added bounded model-facing `fs.write` and non-replacing `fs.move` for arbitrary files and directories, with overwrite protection and rooted fixture coverage. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `TOOL-007` | Added bounded model-facing `fs.write` and non-replacing `fs.move` for arbitrary files and directories, with overwrite protection and rooted fixture coverage. | Repository validation matrix |
+| 2026-09-12 | `FOUND-007` | Started moving process task registration from built-in language-specific tools to repository-configured task definitions. | Focused configuration/app tests pending |
+| 2026-09-12 | `FOUND-007` | Replaced built-in language-specific process tasks with repository-configured task definitions and removed language-specific product guidance/examples. | Repository validation matrix |
