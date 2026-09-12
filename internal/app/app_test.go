@@ -17,6 +17,7 @@ import (
 	"github.com/diakovliev/doit/internal/process"
 	"github.com/diakovliev/doit/internal/processrunner"
 	"github.com/diakovliev/doit/internal/tools"
+	"github.com/diakovliev/doit/internal/workspacefs"
 )
 
 func TestRunCompletesAgainstDeterministicResponsesBackend(t *testing.T) {
@@ -90,5 +91,33 @@ func TestDevelopmentTasksFormatGoFile(t *testing.T) {
 	}
 	if string(contents) != "package p\n\nfunc f() {}\n" {
 		t.Fatalf("unexpected formatted content: %q", contents)
+	}
+}
+
+func TestBuildRegistryExposesGitAndProcessAutomationTools(t *testing.T) {
+	workspace := t.TempDir()
+	filesystem, err := workspacefs.New(workspace)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	processService, err := processrunner.New(workspace, 1024)
+	if err != nil {
+		t.Fatalf("new process runner: %v", err)
+	}
+	if err := registerDevelopmentTasks(processService); err != nil {
+		t.Fatalf("register development tasks: %v", err)
+	}
+	registry, err := buildRegistry(workspace, filesystem, processService)
+	if err != nil {
+		t.Fatalf("build registry: %v", err)
+	}
+	for _, name := range []string{"git.status", "git.diff", "git.stage", "git.commit", "git.restore", "process.run"} {
+		tool, exists := registry.Lookup(name)
+		if !exists {
+			t.Fatalf("automation tool is not registered: %s", name)
+		}
+		if len(tool.Definition().Parameters) == 0 {
+			t.Fatalf("automation tool has no model schema: %s", name)
+		}
 	}
 }

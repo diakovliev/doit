@@ -18,7 +18,11 @@ const defaultInputTokenBudget = 16000
 type Builder struct {
 	filesystem *workspacefs.Service
 	counter    usage.TokenCounter
+	gitStatus  GitStatusProvider
 }
+
+// GitStatusProvider returns a fresh, bounded repository status summary.
+type GitStatusProvider func(stdcontext.Context) (string, error)
 
 // New creates a context builder.
 func New(filesystem *workspacefs.Service, counter usage.TokenCounter) *Builder {
@@ -26,6 +30,14 @@ func New(filesystem *workspacefs.Service, counter usage.TokenCounter) *Builder {
 		counter = usage.ByteEstimator{}
 	}
 	return &Builder{filesystem: filesystem, counter: counter}
+}
+
+// WithGitStatus adds fresh repository status to each newly built context.
+func (builder *Builder) WithGitStatus(provider GitStatusProvider) *Builder {
+	if builder != nil {
+		builder.gitStatus = provider
+	}
+	return builder
 }
 
 // Request describes context to include in a model request.
@@ -51,6 +63,7 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	input := append([]model.InputItem(nil), request.History...)
 	historyCount := len(input)
 	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput})
+	input = builder.appendGitStatus(ctx, input)
 	instructions := request.Instructions + "\n" + builder.projectInstructions(ctx)
 	for _, path := range request.Paths {
 		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
@@ -74,6 +87,17 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, err
 	}
 	return normalized, counts, nil
+}
+
+func (builder *Builder) appendGitStatus(ctx stdcontext.Context, input []model.InputItem) []model.InputItem {
+	if builder.gitStatus == nil {
+		return input
+	}
+	status, err := builder.gitStatus(ctx)
+	if err != nil || status == "" {
+		return input
+	}
+	return append(input, model.InputItem{Type: "message", Role: "user", Content: "Current Git status:\n" + status})
 }
 
 func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request, budget, historyCount int) (usage.Counts, error) {

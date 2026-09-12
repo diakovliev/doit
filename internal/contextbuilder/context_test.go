@@ -4,6 +4,7 @@ import (
 	stdcontext "context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
@@ -23,7 +24,9 @@ func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	builder := contextdata.New(filesystem, usage.ByteEstimator{})
+	builder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(func(stdcontext.Context) (string, error) {
+		return " M README.md", nil
+	})
 	request, counts, err := builder.Build(stdcontext.Background(), contextdata.Request{Model: "test-model", UserInput: "explain the repository", Paths: []string{"README.md"}, MaxInputTokens: 1000, Tools: []model.ToolDefinition{{Type: "function", Name: "fs.read"}}})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -31,8 +34,16 @@ func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 	if request.Model != "test-model" || request.ToolChoice != "auto" || counts.InputTokens == nil || *counts.InputTokens > 1000 {
 		t.Fatalf("unexpected context result: request=%+v usage=%+v", request, counts)
 	}
-	if request.Instructions == "" || len(request.Input) != 2 {
+	if request.Instructions == "" || len(request.Input) != 3 {
 		t.Fatalf("expected instructions and selected file input: %+v", request)
+	}
+	assertFreshGitStatus(t, request.Input)
+}
+
+func assertFreshGitStatus(t *testing.T, input []model.InputItem) {
+	t.Helper()
+	if !strings.Contains(input[1].Content, "Current Git status") {
+		t.Fatalf("expected fresh Git status in context: %+v", input)
 	}
 }
 

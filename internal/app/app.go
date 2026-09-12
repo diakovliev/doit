@@ -97,7 +97,11 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err := registerDevelopmentTasks(processService); err != nil {
 		return runtimeDependencies{}, err
 	}
-	registry, err := buildRegistry(configuration.Workspace, filesystem, processService)
+	gitService, err := gitinspect.New(configuration.Workspace)
+	if err != nil {
+		return runtimeDependencies{}, err
+	}
+	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService)
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
@@ -113,17 +117,22 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	runner := agent.Runner{Client: modelClient, Context: contextdata.New(filesystem, usage.ByteEstimator{}), Tools: registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress}
+	contextBuilder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(gitService.StatusSummary)
+	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress}
 	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close() }}, nil
 }
 
 func buildRegistry(workspace string, filesystem *workspacefs.Service, processService *processrunner.Runner) (*tools.Registry, error) {
-	registry := tools.NewRegistry()
-	if err := workspacefs.RegisterTools(registry, filesystem); err != nil {
-		return nil, err
-	}
 	gitService, err := gitinspect.New(workspace)
 	if err != nil {
+		return nil, err
+	}
+	return buildRegistryWithGit(workspace, filesystem, processService, gitService)
+}
+
+func buildRegistryWithGit(workspace string, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service) (*tools.Registry, error) {
+	registry := tools.NewRegistry()
+	if err := workspacefs.RegisterTools(registry, filesystem); err != nil {
 		return nil, err
 	}
 	if err := gitinspect.RegisterTools(registry, gitService); err != nil {
