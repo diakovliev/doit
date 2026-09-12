@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,12 +25,23 @@ func (handler *testHandler) Agent(_ context.Context, invocation Invocation, _ io
 }
 
 func TestParseRunOptions(t *testing.T) {
-	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "-p", "local", "-m", "test-model", "--ephemeral", "--timeout", "2s", "run", "inspect", "files"})
+	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "-p", "local", "-m", "test-model", "--ephemeral", "--new-session", "--timeout", "2s", "run", "inspect", "files"})
 	if err != nil {
 		t.Fatalf("parse invocation: %v", err)
 	}
-	if invocation.Command != "run" || invocation.Request != "inspect files" || invocation.Directory != "workspace" || invocation.Format != "json" || invocation.Profile != "local" || invocation.Model != "test-model" || !invocation.Ephemeral || invocation.Timeout != 2*time.Second {
+	expected := Invocation{Command: "run", Arguments: []string{"inspect", "files"}, Request: "inspect files", Directory: "workspace", Profile: "local", Model: "test-model", Format: "json", Timeout: 2 * time.Second, Ephemeral: true, NewSession: true}
+	if !reflect.DeepEqual(invocation, expected) {
 		t.Fatalf("unexpected invocation: %+v", invocation)
+	}
+}
+
+func TestParseNoResumeAliasStartsFreshSession(t *testing.T) {
+	invocation, err := Parse([]string{"--no-resume", "run", "hello"})
+	if err != nil {
+		t.Fatalf("parse no-resume option: %v", err)
+	}
+	if !invocation.NewSession {
+		t.Fatal("expected no-resume to request a new session")
 	}
 }
 

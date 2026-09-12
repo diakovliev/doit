@@ -69,3 +69,50 @@ func TestPatchRejectsHashConflictAndPathEscape(t *testing.T) {
 		t.Fatal("expected rename path escape")
 	}
 }
+
+func TestPatchUpdatePreservesUnchangedContent(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(filePath, []byte("old\nsecond\n"), 0600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	patch := "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n"
+	if _, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch}); err != nil {
+		t.Fatalf("apply hunk patch: %v", err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open fixture root: %v", err)
+	}
+	contents, err := rootHandle.ReadFile("file.txt")
+	_ = rootHandle.Close()
+	if err != nil || string(contents) != "new\nsecond\n" {
+		t.Fatalf("unexpected updated content: %q, error=%v", contents, err)
+	}
+}
+
+func TestPatchReportsAndSkipsNoOp(t *testing.T) {
+	root, service := newCodeService(t)
+	patch := "*** Update File: file.txt\n+old\n"
+	preview, err := service.CheckPatch(context.Background(), PatchRequest{Patch: patch})
+	if err != nil {
+		t.Fatalf("check no-op patch: %v", err)
+	}
+	if preview.Changed {
+		t.Fatal("expected no-op patch to report no change")
+	}
+	result, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch})
+	if err != nil {
+		t.Fatalf("apply no-op patch: %v", err)
+	}
+	if result.Changed {
+		t.Fatal("expected applied no-op patch to report no change")
+	}
+	if contents := readCodeFixture(t, root); string(contents) != "old\n" {
+		t.Fatalf("unexpected no-op content: %q", contents)
+	}
+}

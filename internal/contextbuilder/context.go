@@ -33,6 +33,7 @@ type Request struct {
 	Model           string
 	UserInput       string
 	Instructions    string
+	History         []model.InputItem
 	Paths           []string
 	Tools           []model.ToolDefinition
 	MaxInputTokens  int
@@ -47,7 +48,9 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	if request.UserInput == "" {
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, errors.New("context request is empty")
 	}
-	input := []model.InputItem{{Type: "message", Role: "user", Content: request.UserInput}}
+	input := append([]model.InputItem(nil), request.History...)
+	historyCount := len(input)
+	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput})
 	instructions := request.Instructions + "\n" + builder.projectInstructions(ctx)
 	for _, path := range request.Paths {
 		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
@@ -66,14 +69,14 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	if budget <= 0 {
 		budget = defaultInputTokenBudget
 	}
-	counts, err := builder.fitBudget(ctx, &normalized, budget)
+	counts, err := builder.fitBudget(ctx, &normalized, budget, historyCount)
 	if err != nil {
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, err
 	}
 	return normalized, counts, nil
 }
 
-func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request, budget int) (usage.Counts, error) {
+func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request, budget, historyCount int) (usage.Counts, error) {
 	for len(request.Input) > 1 {
 		counts, err := builder.countRequest(ctx, *request)
 		if err != nil {
@@ -81,6 +84,11 @@ func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request
 		}
 		if counts.InputTokens != nil && *counts.InputTokens <= int64(budget) {
 			return counts, nil
+		}
+		if historyCount > 0 {
+			request.Input = request.Input[1:]
+			historyCount--
+			continue
 		}
 		request.Input = request.Input[:len(request.Input)-1]
 	}

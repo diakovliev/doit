@@ -72,6 +72,8 @@ type Record struct {
 // Store persists or serves session records.
 type Store interface {
 	Start(context.Context, Metadata) (ID, error)
+	Resume(context.Context, ID, Metadata) (ID, error)
+	Latest(context.Context) (ID, bool, error)
 	Append(context.Context, ID, Event) error
 	Complete(context.Context, ID, Result) error
 	WriteContinuation(context.Context, ID, json.RawMessage) error

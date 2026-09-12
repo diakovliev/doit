@@ -54,3 +54,22 @@ func TestDefaultPolicyRejectsExplicitlyRejectedRisk(t *testing.T) {
 		t.Fatalf("expected rejected risk to be denied, got %q", decision)
 	}
 }
+
+func TestDefaultPolicyAllowsWorkspaceAutomationForLocalChanges(t *testing.T) {
+	policy := DefaultPolicy{}
+	for _, risk := range []tools.Risk{tools.RiskWrite, tools.RiskProcess, tools.RiskDestructive} {
+		if decision := policy.Decide(context.Background(), Action{Risk: risk, NonInteractive: true, WorkspaceAutomation: true}); decision != DecisionAllow {
+			t.Fatalf("expected workspace automation to allow %q, got %q", risk, decision)
+		}
+	}
+}
+
+func TestWorkspaceAutomationStillRejectsNetworkAndScopeEscapes(t *testing.T) {
+	policy := DefaultPolicy{}
+	if decision := policy.Decide(context.Background(), Action{Risk: tools.RiskWrite, WorkspaceAutomation: true, OutsideWorkspace: true}); decision != DecisionDeny {
+		t.Fatalf("expected outside-workspace automation to be denied, got %q", decision)
+	}
+	if decision := policy.Decide(context.Background(), Action{Risk: tools.RiskProcess, WorkspaceAutomation: true, UsesNetwork: true}); decision != DecisionDeny {
+		t.Fatalf("expected network automation to be denied, got %q", decision)
+	}
+}

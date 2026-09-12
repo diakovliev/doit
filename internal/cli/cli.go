@@ -15,18 +15,19 @@ const defaultVersion = "dev"
 
 // Invocation is the parsed command and its global options.
 type Invocation struct {
-	Command   string
-	Arguments []string
-	Request   string
-	Directory string
-	Profile   string
-	Model     string
-	Format    string
-	Timeout   time.Duration
-	Ephemeral bool
-	NoColor   bool
-	Quiet     bool
-	Verbose   bool
+	Command    string
+	Arguments  []string
+	Request    string
+	Directory  string
+	Profile    string
+	Model      string
+	Format     string
+	Timeout    time.Duration
+	Ephemeral  bool
+	NewSession bool
+	NoColor    bool
+	Quiet      bool
+	Verbose    bool
 }
 
 // Handler executes parsed commands. The foundation leaves model execution
@@ -43,13 +44,15 @@ type Application struct {
 }
 
 var booleanOptionHandlers = map[string]func(*Invocation){
-	"-h":          func(invocation *Invocation) { invocation.Command = "help" },
-	"--help":      func(invocation *Invocation) { invocation.Command = "help" },
-	"--version":   func(invocation *Invocation) { invocation.Command = "version" },
-	"--ephemeral": func(invocation *Invocation) { invocation.Ephemeral = true },
-	"--no-color":  func(invocation *Invocation) { invocation.NoColor = true },
-	"--quiet":     func(invocation *Invocation) { invocation.Quiet = true },
-	"--verbose":   func(invocation *Invocation) { invocation.Verbose = true },
+	"-h":            func(invocation *Invocation) { invocation.Command = "help" },
+	"--help":        func(invocation *Invocation) { invocation.Command = "help" },
+	"--version":     func(invocation *Invocation) { invocation.Command = "version" },
+	"--ephemeral":   func(invocation *Invocation) { invocation.Ephemeral = true },
+	"--new-session": func(invocation *Invocation) { invocation.NewSession = true },
+	"--no-resume":   func(invocation *Invocation) { invocation.NewSession = true },
+	"--no-color":    func(invocation *Invocation) { invocation.NoColor = true },
+	"--quiet":       func(invocation *Invocation) { invocation.Quiet = true },
+	"--verbose":     func(invocation *Invocation) { invocation.Verbose = true },
 }
 
 var valueOptionNames = map[string]struct{}{
@@ -263,7 +266,7 @@ func writeHelp(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: doit [global options] <command> [command options] [arguments]")
 	_, _ = fmt.Fprintln(writer, "")
 	_, _ = fmt.Fprintln(writer, "Commands: agent, run, develop, review, test, status, model, config, session, doctor, version")
-	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --format; --ephemeral; --timeout")
+	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --format; --ephemeral; --new-session; --timeout")
 }
 
 type unavailableHandler struct{}

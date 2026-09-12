@@ -52,14 +52,19 @@ func (service *Service) CheckPatch(ctx context.Context, request PatchRequest) (P
 	if err := validatePatch(ctx, request.Patch); err != nil {
 		return PatchResponse{}, err
 	}
-	paths, err := patchPaths(request.Patch)
+	operations, err := parsePatchOperations(request.Patch)
 	if err != nil {
 		return PatchResponse{}, err
 	}
+	paths := operationPaths(operations)
 	if err := service.checkExpectedHashes(paths, request.ExpectedHashes); err != nil {
 		return PatchResponse{}, err
 	}
-	return PatchResponse{Patch: request.Patch, Paths: paths, Applied: false, Changed: len(paths) > 0}, nil
+	changed, err := service.patchChanged(operations)
+	if err != nil {
+		return PatchResponse{}, err
+	}
+	return PatchResponse{Patch: request.Patch, Paths: paths, Applied: false, Changed: changed}, nil
 }
 
 // ApplyPatch validates and atomically applies a patch after the caller's policy check.
@@ -146,28 +151,28 @@ func (service *Service) Format(ctx context.Context, request FormatRequest) (Form
 // RegisterTools exposes code operations through the normalized registry.
 func RegisterTools(registry *tools.Registry, service *Service) error {
 	adapters := []toolAdapter{
-		{name: "code.check_patch", risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.check_patch", description: "Validate a file patch without changing files. Use the exact patch format: *** Update File: path followed by patch lines. Do not wrap the patch in markdown fences.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.CheckPatch(ctx, request)
 		}},
-		{name: "code.apply_patch", risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.ApplyPatch(ctx, request)
 		}},
-		{name: "code.rename", risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.rename", description: "Rename one workspace path after approval.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RenameRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Rename(ctx, request)
 		}},
-		{name: "code.format", risk: tools.RiskProcess, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.format", description: "Run a configured formatter task inside the workspace. Use task format with Go file paths in arguments, for example [\"main.go\"].", parameters: `{"type":"object","properties":{"task":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"working_directory":{"type":"string"}},"required":["task"]}`, risk: tools.RiskProcess, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request FormatRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -184,13 +189,15 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 }
 
 type toolAdapter struct {
-	name    string
-	risk    tools.Risk
-	execute func(context.Context, tools.Call) (any, error)
+	name        string
+	description string
+	parameters  string
+	risk        tools.Risk
+	execute     func(context.Context, tools.Call) (any, error)
 }
 
 func (adapter toolAdapter) Definition() tools.Definition {
-	return tools.Definition{Name: adapter.name, Risk: adapter.risk, Timeout: 30_000_000_000, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+	return tools.Definition{Name: adapter.name, Description: adapter.description, Parameters: json.RawMessage(adapter.parameters), Risk: adapter.risk, Timeout: 30_000_000_000, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
 }
 
 func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.Result {
@@ -202,9 +209,10 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 }
 
 type patchOperation struct {
-	path    string
-	content string
-	delete  bool
+	path        string
+	content     string
+	updateLines []string
+	delete      bool
 }
 
 func (service *Service) applyOperation(operation patchOperation) error {
@@ -218,6 +226,32 @@ func (service *Service) applyOperation(operation patchOperation) error {
 		}
 		return nil
 	}
+	content, err := service.operationContent(path, operation)
+	if err != nil {
+		return err
+	}
+	current, readErr := service.readWorkspaceFile(path)
+	if readErr == nil && string(current) == content {
+		return nil
+	}
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", readErr)
+	}
+	return service.writeOperation(path, content)
+}
+
+func (service *Service) operationContent(path string, operation patchOperation) (string, error) {
+	if len(operation.updateLines) == 0 {
+		return operation.content, nil
+	}
+	current, err := service.readWorkspaceFile(path)
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
+	}
+	return applyUpdateLines(string(current), operation.updateLines)
+}
+
+func (service *Service) writeOperation(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
@@ -227,7 +261,7 @@ func (service *Service) applyOperation(operation patchOperation) error {
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
-	if _, err := temporary.WriteString(operation.content); err != nil {
+	if _, err := temporary.WriteString(content); err != nil {
 		_ = temporary.Close()
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
@@ -242,6 +276,52 @@ func (service *Service) applyOperation(operation patchOperation) error {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
 	return nil
+}
+
+func (service *Service) readWorkspaceFile(path string) ([]byte, error) {
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	relativePath, err := filepath.Rel(service.workspace, path)
+	if err != nil {
+		return nil, err
+	}
+	return root.ReadFile(relativePath)
+}
+
+func (service *Service) patchChanged(operations []patchOperation) (bool, error) {
+	for _, operation := range operations {
+		path, err := service.scopedPath(operation.path)
+		if err != nil {
+			return false, err
+		}
+		if operation.delete {
+			if _, err := os.Stat(path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+				}
+				return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+			}
+			return true, nil
+		}
+		content, err := service.operationContent(path, operation)
+		if err != nil {
+			return false, err
+		}
+		current, err := service.readWorkspaceFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		if err != nil {
+			return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+		}
+		if string(current) != content {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (service *Service) checkExpectedHashes(paths []string, expected map[string]string) error {
@@ -279,22 +359,18 @@ func validatePatch(ctx context.Context, patch string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(patch) == "" || !strings.Contains(patch, "***") {
+	if strings.TrimSpace(patch) == "" || (!strings.Contains(patch, "*** Add File:") && !strings.Contains(patch, "*** Update File:") && !strings.Contains(patch, "*** Delete File:")) {
 		return apperr.New(apperr.KindUsage, "codetools.check_patch", "patch must contain a supported file operation")
 	}
 	return nil
 }
 
-func patchPaths(patch string) ([]string, error) {
-	operations, err := parsePatchOperations(patch)
-	if err != nil {
-		return nil, err
-	}
+func operationPaths(operations []patchOperation) []string {
 	paths := make([]string, 0, len(operations))
 	for _, operation := range operations {
 		paths = append(paths, operation.path)
 	}
-	return paths, nil
+	return paths
 }
 
 func parsePatchOperations(patch string) ([]patchOperation, error) {
@@ -305,13 +381,18 @@ func parsePatchOperations(patch string) ([]patchOperation, error) {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Add File: "))
-			content, next := collectPatchContent(lines, index+1)
+			patchLines, next := collectPatchLines(lines, index+1)
+			content := addedContent(patchLines)
 			operations = append(operations, patchOperation{path: path, content: content})
 			index = next
 		case strings.HasPrefix(line, "*** Update File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Update File: "))
-			content, next := collectPatchContent(lines, index+1)
-			operations = append(operations, patchOperation{path: path, content: content})
+			patchLines, next := collectPatchLines(lines, index+1)
+			operation := patchOperation{path: path, content: addedContent(patchLines)}
+			if containsUpdateHunk(patchLines) {
+				operation.updateLines = patchLines
+			}
+			operations = append(operations, operation)
 			index = next
 		case strings.HasPrefix(line, "*** Delete File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File: "))
@@ -324,22 +405,98 @@ func parsePatchOperations(patch string) ([]patchOperation, error) {
 	return operations, nil
 }
 
-func collectPatchContent(lines []string, start int) (string, int) {
-	content := make([]string, 0)
+func collectPatchLines(lines []string, start int) ([]string, int) {
+	patchLines := make([]string, 0)
 	index := start
 	for ; index < len(lines); index++ {
 		if strings.HasPrefix(lines[index], "*** ") {
 			break
 		}
-		line := lines[index]
-		if strings.HasPrefix(line, "+") {
+		patchLines = append(patchLines, lines[index])
+	}
+	return patchLines, index - 1
+}
+
+func addedContent(lines []string) string {
+	content := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 			content = append(content, strings.TrimPrefix(line, "+"))
 		}
 	}
 	if len(content) == 0 {
-		return "", index - 1
+		return ""
 	}
-	return strings.Join(content, "\n") + "\n", index - 1
+	return strings.Join(content, "\n") + "\n"
+}
+
+func containsUpdateHunk(lines []string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyUpdateLines(existing string, patchLines []string) (string, error) {
+	hadTrailingNewline := strings.HasSuffix(existing, "\n")
+	existing = strings.TrimSuffix(existing, "\n")
+	oldLines := []string{}
+	if existing != "" {
+		oldLines = strings.Split(existing, "\n")
+	}
+	updated := make([]string, 0, len(oldLines))
+	cursor := 0
+	for _, line := range patchLines {
+		if isHunkHeader(line) {
+			continue
+		}
+		prefix, payload := patchLineParts(line)
+		if prefix == '+' {
+			updated = append(updated, payload)
+			continue
+		}
+		match := findPatchLine(oldLines, cursor, payload)
+		if match < 0 {
+			return "", apperr.New(apperr.KindTool, "codetools.apply_patch", "patch context does not match the current file")
+		}
+		updated = append(updated, oldLines[cursor:match]...)
+		if prefix == ' ' {
+			updated = append(updated, payload)
+		}
+		cursor = match + 1
+	}
+	updated = append(updated, oldLines[cursor:]...)
+	result := strings.Join(updated, "\n")
+	if hadTrailingNewline || len(updated) > 0 {
+		result += "\n"
+	}
+	return result, nil
+}
+
+func isHunkHeader(line string) bool {
+	return line == "" || strings.HasPrefix(line, "@@")
+}
+
+func patchLineParts(line string) (byte, string) {
+	if len(line) == 0 {
+		return ' ', ""
+	}
+	prefix := line[0]
+	if prefix == '+' || prefix == '-' || prefix == ' ' {
+		return prefix, line[1:]
+	}
+	return ' ', line
+}
+
+func findPatchLine(lines []string, start int, value string) int {
+	for index := start; index < len(lines); index++ {
+		if lines[index] == value {
+			return index
+		}
+	}
+	return -1
 }
 
 func (service *Service) scopedPath(path string) (string, error) {

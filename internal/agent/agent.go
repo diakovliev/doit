@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/diakovliev/doit/internal/apperr"
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
@@ -35,16 +36,18 @@ type ProgressFunc func(ProgressEvent)
 
 // Task describes one model-assisted request.
 type Task struct {
-	Command         string
-	Request         string
-	Instructions    string
-	Paths           []string
-	Workspace       string
-	Profile         string
-	Model           string
-	MaxInputTokens  int
-	MaxOutputTokens int
-	NonInteractive  bool
+	Command             string
+	Request             string
+	Instructions        string
+	Paths               []string
+	Workspace           string
+	Profile             string
+	Model               string
+	MaxInputTokens      int
+	MaxOutputTokens     int
+	NonInteractive      bool
+	WorkspaceAutomation bool
+	NewSession          bool
 }
 
 // Outcome is the final normalized task result.
@@ -73,12 +76,22 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 		return Outcome{}, err
 	}
 	metadata := session.Metadata{InvocationPath: task.Workspace, Command: task.Command, Profile: task.Profile, Model: task.Model}
-	sessionID, err := runner.Sessions.Start(ctx, metadata)
+	sessionID, resumed, err := runner.openSession(ctx, metadata, task.NewSession)
 	if err != nil {
 		return Outcome{}, err
 	}
-	runner.emit(ProgressEvent{Phase: "session", Message: "session started"})
-	request, initialUsage, err := runner.buildRequest(ctx, task)
+	message := "session started"
+	var previous *session.Record
+	if resumed {
+		message = "session resumed"
+		record, loadErr := runner.Sessions.Load(ctx, sessionID)
+		if loadErr != nil {
+			return Outcome{SessionID: sessionID}, runner.failSession(ctx, sessionID, loadErr)
+		}
+		previous = &record
+	}
+	runner.emit(ProgressEvent{Phase: "session", Message: message})
+	request, initialUsage, err := runner.buildRequest(ctx, task, previous)
 	if err != nil {
 		return Outcome{SessionID: sessionID}, runner.failSession(ctx, sessionID, err)
 	}
@@ -86,10 +99,25 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 		return Outcome{SessionID: sessionID}, err
 	}
 	runner.emit(ProgressEvent{Phase: "context", Message: "bounded context prepared"})
-	return runner.loop(ctx, sessionID, request, initialUsage, task.NonInteractive)
+	return runner.loop(ctx, sessionID, request, initialUsage, task.NonInteractive, task.WorkspaceAutomation)
 }
 
-func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, nonInteractive bool) (Outcome, error) {
+func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata, newSession bool) (session.ID, bool, error) {
+	if !newSession {
+		latestID, found, err := runner.Sessions.Latest(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			resumedID, resumeErr := runner.Sessions.Resume(ctx, latestID, metadata)
+			return resumedID, true, resumeErr
+		}
+	}
+	startedID, err := runner.Sessions.Start(ctx, metadata)
+	return startedID, false, err
+}
+
+func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
 	totalUsage := initialUsage
 	maxRounds := runner.MaxRounds
 	if maxRounds <= 0 {
@@ -109,7 +137,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 			runner.emit(ProgressEvent{Phase: "session", Message: "task completed"})
 			return outcome, nil
 		}
-		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, nonInteractive); err != nil {
+		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, nonInteractive, workspaceAutomation); err != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 		}
 	}
@@ -157,16 +185,106 @@ func (runner *Runner) validate() error {
 	return nil
 }
 
-func (runner *Runner) buildRequest(ctx context.Context, task Task) (model.Request, usage.Counts, error) {
+func (runner *Runner) buildRequest(ctx context.Context, task Task, previous *session.Record) (model.Request, usage.Counts, error) {
 	definitions := runner.Tools.Definitions()
 	modelTools := make([]model.ToolDefinition, 0, len(definitions))
 	for _, definition := range definitions {
 		modelTools = append(modelTools, model.ToolDefinition{Type: "function", Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters})
 	}
-	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, UserInput: task.Request, Instructions: task.Instructions, Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
 }
 
-func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, nonInteractive bool) error {
+func resumeHistory(record *session.Record) []model.InputItem {
+	if record == nil {
+		return nil
+	}
+	history, requestIndex := recordedRequest(record.Events)
+	if requestIndex < 0 {
+		return previousSummary(record)
+	}
+	pending := make([]pendingCall, 0)
+	for _, event := range record.Events[requestIndex+1:] {
+		history, pending = replayEvent(history, pending, event)
+	}
+	return removePendingCalls(history, pending)
+}
+
+func previousSummary(record *session.Record) []model.InputItem {
+	if record.Result == nil || strings.TrimSpace(record.Result.Summary) == "" {
+		return nil
+	}
+	return []model.InputItem{{Type: "message", Role: "user", Content: "Previous session summary:\n" + record.Result.Summary}}
+}
+
+func replayEvent(history []model.InputItem, pending []pendingCall, event session.Event) ([]model.InputItem, []pendingCall) {
+	if event.Type == "model_message" {
+		return replayModelMessage(history, pending, event.Data)
+	}
+	if event.Type == "tool_result" {
+		return replayToolResult(history, pending, event.Data)
+	}
+	return history, pending
+}
+
+func replayModelMessage(history []model.InputItem, pending []pendingCall, data json.RawMessage) ([]model.InputItem, []pendingCall) {
+	var response model.Response
+	if json.Unmarshal(data, &response) != nil {
+		return history, pending
+	}
+	if response.Text != "" {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: response.Text})
+	}
+	for _, call := range response.ToolCalls {
+		pending = append(pending, pendingCall{index: len(history), callID: call.CallID})
+		history = append(history, model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments})
+	}
+	return history, pending
+}
+
+func replayToolResult(history []model.InputItem, pending []pendingCall, data json.RawMessage) ([]model.InputItem, []pendingCall) {
+	if len(pending) == 0 {
+		return history, pending
+	}
+	call := pending[0]
+	return append(history, model.InputItem{Type: "function_call_output", CallID: call.callID, Output: string(data)}), pending[1:]
+}
+
+type pendingCall struct {
+	index  int
+	callID string
+}
+
+func recordedRequest(events []session.Event) ([]model.InputItem, int) {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type != "request" {
+			continue
+		}
+		var request model.Request
+		if json.Unmarshal(events[index].Data, &request) == nil && len(request.Input) > 0 {
+			return append([]model.InputItem(nil), request.Input...), index
+		}
+	}
+	return nil, -1
+}
+
+func removePendingCalls(history []model.InputItem, pending []pendingCall) []model.InputItem {
+	if len(pending) == 0 {
+		return history
+	}
+	indices := make(map[int]struct{}, len(pending))
+	for _, call := range pending {
+		indices[call.index] = struct{}{}
+	}
+	filtered := make([]model.InputItem, 0, len(history)-len(pending))
+	for index, item := range history {
+		if _, exists := indices[index]; !exists {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, nonInteractive bool, workspaceAutomation bool) error {
 	for _, call := range calls {
 		tool, exists := runner.Tools.Lookup(call.Name)
 		if !exists {
@@ -174,7 +292,7 @@ func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID,
 		}
 		runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
 		definition := tool.Definition()
-		action := policy.Action{Name: definition.Name, Risk: definition.Risk, NonInteractive: nonInteractive}
+		action := policy.Action{Name: definition.Name, Risk: definition.Risk, NonInteractive: nonInteractive, WorkspaceAutomation: workspaceAutomation}
 		decision := runner.Policy.Decide(ctx, action)
 		if decision == policy.DecisionConfirm {
 			if runner.Approve == nil {
@@ -198,7 +316,7 @@ func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID,
 		if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 			return err
 		}
-		runner.emit(ProgressEvent{Phase: "tool", Message: "tool completed: " + call.Name, Tool: call.Name})
+		runner.emit(ProgressEvent{Phase: "tool", Message: "tool " + string(toolResult.Status) + ": " + call.Name, Tool: call.Name})
 		encodedResult, err := json.Marshal(toolResult)
 		if err != nil {
 			return err

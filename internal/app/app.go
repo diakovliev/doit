@@ -43,7 +43,8 @@ func (Handler) Agent(ctx context.Context, invocation cli.Invocation, stdin io.Re
 }
 
 func (Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
-	request, err := requestText(invocation, stdin, stdout)
+	input := bufio.NewReader(stdin)
+	request, err := requestText(invocation, input, stdout)
 	if err != nil {
 		return err
 	}
@@ -62,7 +63,12 @@ func (Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.
 		return err
 	}
 	defer dependencies.close()
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, NonInteractive: invocation.Command == "run"})
+	if invocation.Command == "agent" && configuration.Format != "json" {
+		dependencies.runner.Approve = func(approvalContext context.Context, action policy.Action, call tools.Call) (bool, error) {
+			return promptApproval(approvalContext, input, stdout, action, call)
+		}
+	}
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, NonInteractive: invocation.Command == "run", WorkspaceAutomation: invocation.Command == "run", NewSession: invocation.NewSession})
 	if err != nil {
 		return err
 	}
@@ -142,7 +148,11 @@ func requestText(invocation cli.Invocation, stdin io.Reader, stdout io.Writer) (
 	}
 	if invocation.Command == "agent" {
 		_, _ = fmt.Fprint(stdout, "doit> ")
-		line, err := bufio.NewReader(stdin).ReadString('\n')
+		reader, ok := stdin.(*bufio.Reader)
+		if !ok {
+			reader = bufio.NewReader(stdin)
+		}
+		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
 			return "", apperr.Wrap(apperr.KindUsage, "app.input", err)
 		}
@@ -161,6 +171,27 @@ func requestText(invocation cli.Invocation, stdin io.Reader, stdout io.Writer) (
 	return request, nil
 }
 
+func promptApproval(ctx context.Context, reader *bufio.Reader, writer io.Writer, action policy.Action, call tools.Call) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	_, _ = fmt.Fprintf(writer, "[doit] approval required: %s (%s)\n", action.Name, action.Risk)
+	arguments := strings.TrimSpace(string(call.Arguments))
+	if len(arguments) > 2000 {
+		arguments = arguments[:2000] + "..."
+	}
+	if arguments != "" {
+		_, _ = fmt.Fprintf(writer, "[doit] arguments: %s\n", arguments)
+	}
+	_, _ = fmt.Fprint(writer, "[doit] allow this action? [y/N] ")
+	answer, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
+}
+
 func ephemeralOverride(invocation cli.Invocation) *bool {
 	if !invocation.Ephemeral {
 		return nil
@@ -173,7 +204,8 @@ func registerDevelopmentTasks(runner *processrunner.Runner) error {
 	tasks := []processrunner.Definition{
 		{Name: "test", Executable: "go", Arguments: []string{"test", "./..."}},
 		{Name: "vet", Executable: "go", Arguments: []string{"vet", "./..."}},
-		{Name: "format-check", Executable: "gofmt", Arguments: []string{"-l", "."}},
+		{Name: "format", Executable: "gofmt", Arguments: []string{"-w"}},
+		{Name: "format-check", Executable: "gofmt", Arguments: []string{"-l"}},
 		{Name: "lint", Executable: "golangci-lint", Arguments: []string{"run"}},
 		{Name: "security", Executable: "gosec", Arguments: []string{"./..."}},
 	}

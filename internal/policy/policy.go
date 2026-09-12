@@ -19,11 +19,12 @@ const (
 
 // Action contains the side-effect metadata needed for a policy decision.
 type Action struct {
-	Name             string
-	Risk             tools.Risk
-	OutsideWorkspace bool
-	UsesNetwork      bool
-	NonInteractive   bool
+	Name                string
+	Risk                tools.Risk
+	OutsideWorkspace    bool
+	UsesNetwork         bool
+	NonInteractive      bool
+	WorkspaceAutomation bool
 }
 
 // ApprovalPolicy decides without executing the action.
@@ -44,6 +45,9 @@ func (DefaultPolicy) Decide(ctx context.Context, action Action) Decision {
 		return DecisionDeny
 	}
 	if action.Risk == tools.RiskReadOnly {
+		return DecisionAllow
+	}
+	if action.WorkspaceAutomation {
 		return DecisionAllow
 	}
 	if action.NonInteractive {

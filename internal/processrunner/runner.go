@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,8 +100,9 @@ type processTool struct {
 	runner *Runner
 }
 
-func (processTool) Definition() tools.Definition {
-	return tools.Definition{Name: "process.run", Description: "Run a configured development task.", Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+func (tool processTool) Definition() tools.Definition {
+	taskNames := tool.runner.taskNames()
+	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Use a task name from the advertised enum, not an executable or shell command.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
 }
 
 func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Result {
@@ -118,7 +120,7 @@ func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Resu
 func (runner *Runner) prepare(task process.Task) (Definition, string, time.Duration, error) {
 	definition, exists := runner.tasks[task.Name]
 	if !exists {
-		return Definition{}, "", 0, apperr.New(apperr.KindPolicy, "processrunner.run", "task is not allowlisted: "+task.Name)
+		return Definition{}, "", 0, apperr.New(apperr.KindPolicy, "processrunner.run", "task is not allowlisted: "+task.Name+" (available: "+strings.Join(runner.taskNames(), ", ")+")")
 	}
 	workingDirectory, err := runner.workingDirectory(task.WorkingDirectory)
 	if err != nil {
@@ -129,6 +131,33 @@ func (runner *Runner) prepare(task process.Task) (Definition, string, time.Durat
 		timeout = 30 * time.Second
 	}
 	return definition, workingDirectory, timeout, nil
+}
+
+func (runner *Runner) taskNames() []string {
+	names := make([]string, 0, len(runner.tasks))
+	for name := range runner.tasks {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func processParameters(taskNames []string) json.RawMessage {
+	parameters := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"task":              map[string]any{"type": "string", "enum": taskNames},
+			"args":              map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
+			"working_directory": map[string]string{"type": "string"},
+			"timeout":           map[string]any{"type": "integer", "minimum": 0},
+		},
+		"required": []string{"task"},
+	}
+	encoded, err := json.Marshal(parameters)
+	if err != nil {
+		return json.RawMessage(`{"type":"object","required":["task"]}`)
+	}
+	return encoded
 }
 
 func (runner *Runner) workingDirectory(requested string) (string, error) {

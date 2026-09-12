@@ -13,7 +13,7 @@ The tool must remain useful in two modes:
 - **Command mode:** Run a focused development, review, or testing task and exit with a useful result and status code.
 - **Agent mode:** Start an interactive shell in which the user and the agent work through several related steps while sharing session context.
 
-The user remains responsible for the workspace. The agent can suggest actions and, when authorized, perform them, but it must make tool use visible and keep destructive operations behind an explicit safety boundary.
+The user remains responsible for the workspace. `doit agent` asks before confirmation-required actions; `doit run` is an explicit automation mode that may perform local workspace changes through allowlisted tools while keeping network, path-escape, and remote operations blocked.
 
 ## 2. Design Goals
 
@@ -309,7 +309,7 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 - `code.check_patch`: Validate a unified patch without changing files and return the affected paths and conflicts.
 - `code.apply_patch`: Create, update, or delete files from a validated patch. It must support preview, atomic per-file replacement, expected-content hashes, and conflict failure.
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
-- `code.format`: Run a named, configured formatter and return the proposed diff. It must not accept an arbitrary executable or unbounded argument string.
+- `code.format`: Run a named, configured formatter and return its bounded result. The built-in `format` task runs `gofmt -w` on explicit workspace-relative Go file arguments; `format-check` runs `gofmt -l` without changing files. It must not accept an arbitrary executable or unbounded argument string.
 
 All code writes must produce a diff or changed-path summary before completion. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch.
 
@@ -327,7 +327,7 @@ Git inspection must report the repository root when it differs from the effectiv
 
 **Validation and development processes** use an allowlisted runner:
 
-- `process.run`: Execute a named configured task such as `test`, `format-check`, `lint`, `vet`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit.
+- `process.run`: Execute a named configured task such as `test`, `format-check`, `lint`, `vet`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
 
 The model may select a configured task and parameters, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
 
@@ -357,11 +357,11 @@ The default policy should use these risk levels:
 
 - **Read-only:** `fs.*` inspection and `git.*` inspection may run automatically within the workspace and configured repository scope.
 - **Validation:** `process.run` requires a configured task name and may run automatically only for commands explicitly marked safe. Tests and format checks must still respect timeouts and output limits.
-- **Write:** `code.apply_patch`, `code.rename`, and `code.format` require a preview and user confirmation unless the active policy explicitly permits them.
+- **Write:** `code.apply_patch`, `code.rename`, and `code.format` require a preview and user confirmation in agent mode. `doit run` explicitly permits these operations within the workspace.
 - **Destructive or history-changing:** Deletes, `git.restore`, `git.commit`, branch changes, and any future remote operation require explicit confirmation for every invocation.
 - **Rejected by default:** Arbitrary shell commands, path escapes, writes outside the workspace, force operations, and remote Git changes.
 
-The policy layer must show the affected paths, proposed diff or Git change, command identity, and requested permissions before confirmation. Users may choose stricter policies; permissive modes should be clearly visible.
+The policy layer must show the affected paths, proposed diff or Git change, command identity, and requested permissions before confirmation. In workspace automation mode, the same tool and path validation still applies, but confirmation is not requested for local changes. Users may choose stricter policies; permissive modes should be clearly visible.
 
 ### 4.7 Session Store
 
@@ -407,6 +407,8 @@ Session IDs must not contain user request text or secrets. A session lock preven
 The default session policy is:
 
 - Durable sessions are stored locally under `.doit/sessions/` and remain until the user deletes or prunes them.
+- Subsequent durable invocations automatically resume the newest completed or failed resumable session below the effective invocation path, including its bounded public conversation history.
+- `--new-session` and `--no-resume` explicitly opt out of automatic reuse and start a new durable session.
 - `--ephemeral` keeps the same in-memory orchestration behavior but writes no session directory and disables resume.
 - `doit session export` creates an explicit shareable artifact after applying the same redaction and size limits.
 - `doit session` commands operate only on sessions below the effective invocation path unless a future explicit cross-workspace command is added.

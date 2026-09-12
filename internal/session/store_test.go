@@ -130,6 +130,62 @@ func TestStaleLockCanBeRecovered(t *testing.T) {
 	}
 }
 
+func TestLatestAndResumePreserveSessionHistory(t *testing.T) {
+	root, store := newPersistentStore(t)
+	defer func() { _ = store.Close() }()
+	firstID := startTestSession(t, store, root)
+	completeTestSession(t, store, firstID)
+	time.Sleep(time.Millisecond)
+	secondID := startTestSession(t, store, root)
+	appendSessionEvent(t, store, secondID)
+	completeTestSession(t, store, secondID)
+
+	latestID := latestSessionID(t, store, secondID)
+	if _, err := store.Resume(context.Background(), latestID, Metadata{Command: "follow-up", Model: "new-model"}); err != nil {
+		t.Fatalf("resume latest session: %v", err)
+	}
+	record, err := store.Load(context.Background(), latestID)
+	if err != nil {
+		t.Fatalf("load resumed session: %v", err)
+	}
+	assertResumedSession(t, record)
+}
+
+func newPersistentStore(t *testing.T) (string, *FileStore) {
+	t.Helper()
+	root := t.TempDir()
+	return root, newStore(t, root, false)
+}
+
+func appendSessionEvent(t *testing.T, store *FileStore, id ID) {
+	t.Helper()
+	if err := store.Append(context.Background(), id, Event{Type: "request", Data: json.RawMessage(`{"request":"second"}`)}); err != nil {
+		t.Fatalf("append second session event: %v", err)
+	}
+}
+
+func latestSessionID(t *testing.T, store *FileStore, expected ID) ID {
+	t.Helper()
+	latestID, found, err := store.Latest(context.Background())
+	if err != nil || !found || latestID != expected {
+		t.Fatalf("unexpected latest session: id=%q found=%t error=%v", latestID, found, err)
+	}
+	return latestID
+}
+
+func assertResumedSession(t *testing.T, record Record) {
+	t.Helper()
+	if record.Metadata.Status != StatusActive {
+		t.Fatalf("unexpected resumed status: %s", record.Metadata.Status)
+	}
+	if record.Metadata.Command != "follow-up" || record.Metadata.Model != "new-model" {
+		t.Fatalf("resume metadata was not updated: %+v", record.Metadata)
+	}
+	if record.Result != nil || len(record.Events) != 1 {
+		t.Fatalf("resume did not preserve session history correctly: %+v", record)
+	}
+}
+
 func containsSecret(data []byte) bool {
 	return bytes.Contains(data, []byte("secret-token"))
 }

@@ -87,9 +87,10 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 #### `DEC-005` Approval Policy
 
 - Read-only filesystem and Git inspection is automatic within the effective scope.
-- Process execution, code writes, renames, deletes, and all Git index or history changes require confirmation in the MVP.
+- `doit agent` requires confirmation for process execution, code writes, renames, deletes, and all Git index or history changes.
+- `doit run` is explicit workspace automation: it may execute allowlisted process tasks and local code changes without an interactive prompt, while path escapes, network access, remote Git operations, and rejected-risk tools remain denied.
 - Arbitrary shell pipelines, path escapes, writes outside the workspace, remote access, pushes, force operations, and history rewrites are rejected.
-- Non-interactive invocations deny confirmation-required actions unless an explicit configured policy allows them.
+- JSON output remains non-interactive and does not emit approval prompts; confirmation-required actions are denied unless workspace automation is explicitly active.
 
 #### `DEC-006` Token Accounting
 
@@ -157,7 +158,8 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 | `HARD-001` | Add security and boundary tests. | `MVP-001` | Workspace escapes, symlink escapes, command injection, secret leakage, oversized output, interrupted processes, and unsafe Git operations are covered. | `TODO` |
 | `HARD-002` | Add reviewable operational diagnostics. | `MVP-001` | Request IDs, provider errors, rate limits, tool timings, validation status, and redacted session evidence are available without credentials. | `TODO` |
 | `WORK-001` | Add dedicated `develop`, `review`, and `test` workflows. | `MVP-001`, `HARD-001` | Each workflow has focused context selection, output, validation, and exit-status tests. | `TODO` |
-| `WORK-002` | Add session resume, export, pruning, and recovery commands. | `SESSION-001`, `MVP-001` | Interrupted and completed sessions can be safely inspected, resumed, exported, and pruned under the documented policy. | `TODO` |
+| `WORK-002` | Add session resume, export, pruning, and recovery commands. | `SESSION-001`, `MVP-001` | Interrupted and completed sessions can be safely inspected, resumed, exported, and pruned under the documented policy. | `IN PROGRESS` |
+| `WORK-002A` | Reuse the latest durable session automatically. | `SESSION-001`, `MVP-001` | Subsequent runs reuse the newest non-active resumable workspace session, replay bounded public turns, and support explicit fresh-session opt-outs. | `DONE` |
 | `WORK-003` | Add CI for the repository's required checks. | `HARD-001` | CI runs tests, vet, lint, gosec, deterministic integration tests, and platform-specific checks without live model credentials. | `TODO` |
 
 ## Deferred Work
@@ -185,3 +187,9 @@ Deferred work must not change the approval, observability, token accounting, ses
 | 2026-09-12 | `MODEL-001`, `CONTEXT-001`, `AGENT-001`, `CLI-001`, `MVP-001` | Implemented the Responses HTTP adapter, bounded context builder, model/tool orchestration, stdin-aware CLI composition, process validation tool, and deterministic end-to-end CLI vertical slice. `MODEL-002` remains deferred by `DEC-001`. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
 | 2026-09-12 | `RUN-001` | Validated the local Docker Ollama backend at `http://127.0.0.1:11434/v1` with `phi4-mini:latest`; simple `doit run` completed successfully, while installed models rejected tool calls or produced simulated tool prose. | Ollama Responses probe; `go run . --ephemeral --timeout 5m run "Reply with exactly: hello"`; tool-call trials with `phi4-mini`, `phi4-mini-reasoning`, and `deepseek-coder-v2` |
 | 2026-09-12 | `RUN-003` | Added bounded Foundry rate-limit retries with `Retry-After` support, jittered backoff, minimum request pacing, and distinct exhausted-throttle errors. | `go test ./internal/modelhttp`; full repository validation |
+| 2026-09-12 | `CLI-001` | Wired explicit interactive approval prompts for `doit agent`; `doit run` and JSON mode remain non-interactive and deny confirmation-required tools. | `go test ./internal/app ./internal/agent`; full repository validation |
+| 2026-09-12 | `AUTO-001` | Made `doit run` explicit workspace automation: local write/process/destructive tools can execute without prompts, while path escapes, network access, remote operations, and rejected-risk tools remain denied. | `go test ./internal/policy ./internal/agent ./internal/app`; full repository validation |
+| 2026-09-12 | `TOOL-004` | Hardened code-operation outcomes so patch previews and applications report actual content changes, identical writes are skipped, and the built-in formatter exposes explicit `format` and `format-check` tasks. | `go test ./internal/codetools ./internal/app`; full repository validation |
+| 2026-09-12 | `CLI-001` | Clarified root entrypoint integration by extracting `os.Args[1:]` once and wiring a named application handler. | `go test .`; full repository validation |
+| 2026-09-12 | `WORK-002A` | Implemented automatic durable-session reuse: subsequent runs select the newest non-active resumable session in the effective workspace by default, replay bounded public turns, and support `--new-session`, `--no-resume`, and `--ephemeral` opt-outs. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...`; `git diff --check` |
+| 2026-09-12 | `TOOL-003`, `CLI-001` | Published the configured process-task enum and structured schema to model calls, improved unknown-task diagnostics, and replaced the placeholder entrypoint test with root CLI argument/exit-code coverage. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |

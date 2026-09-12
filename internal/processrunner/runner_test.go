@@ -2,12 +2,14 @@ package processrunner
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/diakovliev/doit/internal/process"
+	"github.com/diakovliev/doit/internal/tools"
 )
 
 func TestRunnerExecutesAllowlistedTask(t *testing.T) {
@@ -34,6 +36,42 @@ func TestRunnerTimesOut(t *testing.T) {
 	if err == nil || !result.TimedOut {
 		t.Fatalf("expected timeout, result=%+v error=%v", result, err)
 	}
+}
+
+func TestProcessToolAdvertisesAndExecutesAllowlistedTask(t *testing.T) {
+	runner := newTestRunner(t)
+	registry := tools.NewRegistry()
+	if err := RegisterTool(registry, runner); err != nil {
+		t.Fatalf("register process tool: %v", err)
+	}
+	tool, exists := registry.Lookup("process.run")
+	if !exists {
+		t.Fatal("process tool was not registered")
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Definition().Parameters, &schema); err != nil {
+		t.Fatalf("decode process schema: %v", err)
+	}
+	if !contains(schema.Properties["task"].Enum, "echo") {
+		t.Fatalf("process schema omitted echo task: %+v", schema.Properties["task"].Enum)
+	}
+	result := tool.Execute(context.Background(), tools.Call{Name: "process.run", Arguments: []byte(`{"task":"echo","args":["hello"]}`)})
+	if result.Status != tools.StatusSucceeded {
+		t.Fatalf("process tool failed: %+v", result)
+	}
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func newTestRunner(t *testing.T) *Runner {

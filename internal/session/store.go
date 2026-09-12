@@ -118,6 +118,95 @@ func (store *FileStore) Start(ctx context.Context, metadata Metadata) (ID, error
 	return store.startPersistent(metadata)
 }
 
+// Latest returns the newest completed or failed durable session in this workspace.
+func (store *FileStore) Latest(ctx context.Context) (ID, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.ephemeral {
+		return "", false, nil
+	}
+	directory, err := store.rootFS.Open(".")
+	if err != nil {
+		return "", false, apperr.Wrap(apperr.KindTool, "session.latest", err)
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return "", false, apperr.Wrap(apperr.KindTool, "session.latest", readErr)
+	}
+	if closeErr != nil {
+		return "", false, apperr.Wrap(apperr.KindTool, "session.latest", closeErr)
+	}
+	return newestSession(store.rootFS, entries)
+}
+
+// Resume reopens a completed or failed session while preserving its history.
+func (store *FileStore) Resume(ctx context.Context, id ID, metadata Metadata) (ID, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.ephemeral {
+		return "", apperr.New(apperr.KindPolicy, "session.resume", "ephemeral sessions cannot be resumed")
+	}
+	return store.resumePersistent(id, metadata)
+}
+
+func (store *FileStore) resumePersistent(id ID, metadata Metadata) (ID, error) {
+	directory, err := store.existingSessionDirectory(id)
+	if err != nil {
+		return "", err
+	}
+	existing, err := readMetadata(store.rootFS, filepath.Join(directory, "manifest.json"))
+	if err != nil {
+		return "", err
+	}
+	if !existing.Resumable {
+		return "", apperr.New(apperr.KindPolicy, "session.resume", "session is not resumable")
+	}
+	if err := acquireLock(store.rootFS, directory); err != nil {
+		return "", err
+	}
+	if err := store.writeResumedMetadata(directory, mergeResumeMetadata(existing, metadata)); err != nil {
+		_ = store.rootFS.Remove(filepath.Join(directory, "lock"))
+		return "", err
+	}
+	return id, nil
+}
+
+func mergeResumeMetadata(existing, requested Metadata) Metadata {
+	resumed := existing
+	if requested.InvocationPath != "" {
+		resumed.InvocationPath = requested.InvocationPath
+	}
+	if requested.Command != "" {
+		resumed.Command = requested.Command
+	}
+	if requested.Profile != "" {
+		resumed.Profile = requested.Profile
+	}
+	if requested.Model != "" {
+		resumed.Model = requested.Model
+	}
+	resumed.UpdatedAt = time.Now().UTC()
+	resumed.Status = StatusActive
+	return resumed
+}
+
+func (store *FileStore) writeResumedMetadata(directory string, metadata Metadata) error {
+	if err := atomicWriteJSON(store.rootFS, filepath.Join(directory, "manifest.json"), metadata); err != nil {
+		return err
+	}
+	if err := store.rootFS.Remove(filepath.Join(directory, "result.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return apperr.Wrap(apperr.KindTool, "session.resume", err)
+	}
+	return nil
+}
+
 func (store *FileStore) startPersistent(metadata Metadata) (ID, error) {
 	directory := string(metadata.ID)
 	if err := store.rootFS.MkdirAll(directory, 0700); err != nil {
@@ -140,6 +229,29 @@ func (store *FileStore) startPersistent(metadata Metadata) (ID, error) {
 		return "", apperr.Wrap(apperr.KindTool, "session.start", err)
 	}
 	return metadata.ID, nil
+}
+
+func newestSession(root *os.Root, entries []os.DirEntry) (ID, bool, error) {
+	var newest ID
+	var newestTime time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() || !validID(ID(entry.Name())) {
+			continue
+		}
+		metadata, err := readMetadata(root, filepath.Join(entry.Name(), "manifest.json"))
+		if err != nil || !metadata.Resumable || metadata.Status == StatusActive {
+			continue
+		}
+		updatedAt := metadata.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = metadata.CreatedAt
+		}
+		if newest == "" || updatedAt.After(newestTime) {
+			newest = ID(entry.Name())
+			newestTime = updatedAt
+		}
+	}
+	return newest, newest != "", nil
 }
 
 // Append writes one redacted, bounded event in sequence order.
