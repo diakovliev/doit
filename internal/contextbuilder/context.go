@@ -110,8 +110,7 @@ func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request
 			return counts, nil
 		}
 		if historyCount > 0 {
-			request.Input = request.Input[1:]
-			historyCount--
+			request.Input, historyCount = dropOldestHistoryItem(request.Input, historyCount)
 			continue
 		}
 		request.Input = request.Input[:len(request.Input)-1]
@@ -124,6 +123,27 @@ func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request
 		return usage.Counts{Source: usage.SourceUnknown}, errors.New("context exceeds input token budget")
 	}
 	return counts, nil
+}
+
+func dropOldestHistoryItem(input []model.InputItem, historyCount int) ([]model.InputItem, int) {
+	if historyCount <= 0 || len(input) == 0 {
+		return input, historyCount
+	}
+	dropped := input[0]
+	input = input[1:]
+	historyCount--
+	if dropped.Type != "function_call" || dropped.CallID == "" {
+		return input, historyCount
+	}
+	for index := 0; index < historyCount; index++ {
+		item := input[index]
+		if item.Type == "function_call_output" && item.CallID == dropped.CallID {
+			input = append(input[:index], input[index+1:]...)
+			historyCount--
+			break
+		}
+	}
+	return input, historyCount
 }
 
 func (builder *Builder) countRequest(ctx stdcontext.Context, request model.Request) (usage.Counts, error) {
@@ -140,11 +160,10 @@ func (builder *Builder) countRequest(ctx stdcontext.Context, request model.Reque
 }
 
 func (builder *Builder) projectInstructions(ctx stdcontext.Context) string {
-	readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: ".github/copilot-instructions.md", MaxBytes: 16 * 1024})
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return ""
 	}
-	return readResponse.Content
+	return loadRepositoryGuidance(ctx, builder.filesystem.Root())
 }
 
 func formatEntries(listing workspacefs.ListResponse) string {

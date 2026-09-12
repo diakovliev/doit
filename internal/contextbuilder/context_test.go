@@ -2,6 +2,7 @@ package contextbuilder_test
 
 import (
 	stdcontext "context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,11 +16,7 @@ import (
 
 func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".github"), 0700); err != nil {
-		t.Fatalf("make instructions directory: %v", err)
-	}
-	writeContextFile(t, filepath.Join(root, ".github", "copilot-instructions.md"), "Follow repository rules.")
-	writeContextFile(t, filepath.Join(root, "README.md"), "repository contents")
+	writeGuidanceFixture(t, root)
 	filesystem, err := workspacefs.New(root)
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -38,12 +35,87 @@ func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 		t.Fatalf("expected instructions and selected file input: %+v", request)
 	}
 	assertFreshGitStatus(t, request.Input)
+	assertGuidance(t, request.Instructions)
+}
+
+func writeGuidanceFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, directory := range []string{".github", ".github/instructions", ".github/skills/review", ".doit/instructions", ".doit/skills/testing"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0700); err != nil {
+			t.Fatalf("make guidance directory: %v", err)
+		}
+	}
+	files := map[string]string{
+		".github/copilot-instructions.md":         "Follow repository rules.",
+		".github/instructions/go.instructions.md": "Use Go conventions.",
+		".github/skills/review/SKILL.md":          "Review changed code.",
+		".doit/instructions.md":                   "Use local project rules.",
+		".doit/instructions/testing.md":           "Run focused tests first.",
+		".doit/skills/testing/SKILL.md":           "Prefer deterministic tests.",
+		"README.md":                               "repository contents",
+	}
+	for path, content := range files {
+		writeContextFile(t, filepath.Join(root, path), content)
+	}
 }
 
 func assertFreshGitStatus(t *testing.T, input []model.InputItem) {
 	t.Helper()
 	if !strings.Contains(input[1].Content, "Current Git status") {
 		t.Fatalf("expected fresh Git status in context: %+v", input)
+	}
+}
+
+func TestBuilderTrimsFunctionCallsWithTheirOutputs(t *testing.T) {
+	root := t.TempDir()
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, itemCountCounter{})
+	history := []model.InputItem{
+		{Type: "message", Role: "assistant", Content: "old"},
+		{Type: "function_call", CallID: "call-1", Name: "fs.read", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "call-1", Output: "{}"},
+	}
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{Model: "test-model", UserInput: "continue", History: history, MaxInputTokens: 2})
+	if err != nil {
+		t.Fatalf("build trimmed context: %v", err)
+	}
+	if hasOrphanedToolOutput(request.Input) {
+		t.Fatalf("trimmed history contains orphaned tool output: %+v", request.Input)
+	}
+}
+
+type itemCountCounter struct{}
+
+func (itemCountCounter) Count(_ stdcontext.Context, content []byte) (int64, error) {
+	var request model.Request
+	if err := json.Unmarshal(content, &request); err != nil {
+		return 0, err
+	}
+	return int64(len(request.Input)), nil
+}
+
+func hasOrphanedToolOutput(input []model.InputItem) bool {
+	calls := make(map[string]bool)
+	for _, item := range input {
+		if item.Type == "function_call" {
+			calls[item.CallID] = true
+		}
+		if item.Type == "function_call_output" && !calls[item.CallID] {
+			return true
+		}
+	}
+	return false
+}
+
+func assertGuidance(t *testing.T, instructions string) {
+	t.Helper()
+	for _, expected := range []string{"Follow repository rules.", "Use Go conventions.", "Review changed code.", "Use local project rules.", "Run focused tests first.", "Prefer deterministic tests."} {
+		if !strings.Contains(instructions, expected) {
+			t.Fatalf("expected guidance %q in instructions: %s", expected, instructions)
+		}
 	}
 }
 
