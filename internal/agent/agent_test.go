@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -51,6 +52,23 @@ func TestRunnerAutomaticallyResumesLatestWorkspaceSession(t *testing.T) {
 	}
 	if !requestContains(client.requests[2], "first request") || !requestContains(client.requests[2], "finished") || !requestContains(client.requests[2], "second request") {
 		t.Fatalf("resumed request did not contain prior public turns: %+v", client.requests[2].Input)
+	}
+}
+
+func TestResumeHistoryDropsOrphanedAndIncompleteToolItems(t *testing.T) {
+	request := model.Request{Input: []model.InputItem{
+		{Type: "function_call_output", CallID: "orphan", Output: "{}"},
+		{Type: "function_call", CallID: "complete", Name: "fs.read", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "complete", Output: "{}"},
+		{Type: "function_call", CallID: "pending", Name: "fs.read", Arguments: "{}"},
+	}}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal resumed request: %v", err)
+	}
+	history := resumeHistory(&session.Record{Events: []session.Event{{Type: "request", Data: data}}})
+	if len(history) != 2 || history[0].CallID != "complete" || history[1].CallID != "complete" {
+		t.Fatalf("unexpected sanitized history: %+v", history)
 	}
 }
 

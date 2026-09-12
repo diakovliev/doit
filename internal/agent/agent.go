@@ -206,7 +206,7 @@ func resumeHistory(record *session.Record) []model.InputItem {
 	for _, event := range record.Events[requestIndex+1:] {
 		history, pending = replayEvent(history, pending, event)
 	}
-	return removePendingCalls(history, pending)
+	return sanitizeHistory(removePendingCalls(history, pending))
 }
 
 func previousSummary(record *session.Record) []model.InputItem {
@@ -282,6 +282,42 @@ func removePendingCalls(history []model.InputItem, pending []pendingCall) []mode
 		}
 	}
 	return filtered
+}
+
+func sanitizeHistory(history []model.InputItem) []model.InputItem {
+	activeCalls := make(map[string]int)
+	matchedCalls := make(map[string]bool)
+	filtered := make([]model.InputItem, 0, len(history))
+	for _, item := range history {
+		switch item.Type {
+		case "function_call":
+			if item.CallID == "" {
+				continue
+			}
+			activeCalls[item.CallID] = len(filtered)
+			filtered = append(filtered, item)
+		case "function_call_output":
+			if _, exists := activeCalls[item.CallID]; !exists {
+				continue
+			}
+			matchedCalls[item.CallID] = true
+			delete(activeCalls, item.CallID)
+			filtered = append(filtered, item)
+		default:
+			filtered = append(filtered, item)
+		}
+	}
+	if len(activeCalls) == 0 {
+		return filtered
+	}
+	result := make([]model.InputItem, 0, len(filtered)-len(activeCalls))
+	for _, item := range filtered {
+		if item.Type == "function_call" && !matchedCalls[item.CallID] {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, nonInteractive bool, workspaceAutomation bool) error {
