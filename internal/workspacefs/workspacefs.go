@@ -384,9 +384,231 @@ func (service *Service) Hash(ctx context.Context, request HashRequest) (HashResp
 	return HashResponse{Path: filepath.ToSlash(relativePath), SHA256: hex.EncodeToString(hasher.Sum(nil)), Bytes: bytesRead}, nil
 }
 
+// WriteRequest controls bounded workspace file creation or replacement.
+type WriteRequest struct {
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Parents   bool   `json:"parents"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+// WriteResponse describes the written workspace file.
+type WriteResponse struct {
+	Path      string `json:"path"`
+	Bytes     int    `json:"bytes"`
+	Created   bool   `json:"created"`
+	Overwrote bool   `json:"overwrote"`
+}
+
+// Write creates or explicitly overwrites one bounded workspace file.
+func (service *Service) Write(ctx context.Context, request WriteRequest) (WriteResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return WriteResponse{}, err
+	}
+	path, err := service.mutationPath(request.Path, "workspacefs.write")
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	content := []byte(request.Content)
+	if len(content) > defaultMaxBytes {
+		return WriteResponse{}, apperr.New(apperr.KindUsage, "workspacefs.write", "content exceeds the 64 KiB limit")
+	}
+	root, err := os.OpenRoot(service.root)
+	if err != nil {
+		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+	}
+	defer func() { _ = root.Close() }()
+	return writeRootFile(root, path, content, request)
+}
+
+func writeRootFile(root *os.Root, path string, content []byte, request WriteRequest) (WriteResponse, error) {
+	exists, err := prepareRootFile(root, path, request)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	flags := writeFlags(request.Overwrite)
+	file, err := root.OpenFile(path, flags, 0600)
+	if err != nil {
+		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+	}
+	written, err := writeAndClose(file, content)
+	if err != nil {
+		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+	}
+	return WriteResponse{Path: filepath.ToSlash(path), Bytes: written, Created: !exists, Overwrote: exists}, nil
+}
+
+func prepareRootFile(root *os.Root, path string, request WriteRequest) (bool, error) {
+	_, statErr := root.Stat(path)
+	exists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return false, apperr.Wrap(apperr.KindTool, "workspacefs.write", statErr)
+	}
+	if exists && !request.Overwrite {
+		return false, apperr.New(apperr.KindPolicy, "workspacefs.write", "destination exists; set overwrite=true to replace it")
+	}
+	if request.Parents {
+		parent := filepath.Dir(path)
+		if parent != "." {
+			if err := root.MkdirAll(parent, 0700); err != nil {
+				return false, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+			}
+		}
+	}
+	return exists, nil
+}
+
+func writeAndClose(file *os.File, content []byte) (int, error) {
+	written, writeErr := file.Write(content)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return 0, writeErr
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+	return written, nil
+}
+
+func writeFlags(overwrite bool) int {
+	flags := os.O_CREATE | os.O_WRONLY
+	if overwrite {
+		return flags | os.O_TRUNC
+	}
+	return flags | os.O_EXCL
+}
+
+// MoveRequest controls a non-replacing workspace path move.
+type MoveRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// MoveResponse describes a moved workspace path.
+type MoveResponse struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// Move moves a file or directory without replacing an existing destination.
+func (service *Service) Move(ctx context.Context, request MoveRequest) (MoveResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return MoveResponse{}, err
+	}
+	from, err := service.mutationPath(request.From, "workspacefs.move")
+	if err != nil {
+		return MoveResponse{}, err
+	}
+	to, err := service.mutationPath(request.To, "workspacefs.move")
+	if err != nil {
+		return MoveResponse{}, err
+	}
+	root, err := os.OpenRoot(service.root)
+	if err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Stat(to); err == nil {
+		return MoveResponse{}, apperr.New(apperr.KindPolicy, "workspacefs.move", "destination already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	if err := root.Rename(from, to); err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	return MoveResponse{From: filepath.ToSlash(from), To: filepath.ToSlash(to)}, nil
+}
+
+// MkdirRequest controls workspace directory creation.
+type MkdirRequest struct {
+	Path    string `json:"path"`
+	Parents bool   `json:"parents"`
+}
+
+// MkdirResponse describes the created directory path.
+type MkdirResponse struct {
+	Path string `json:"path"`
+}
+
+// Mkdir creates one workspace directory, optionally including parents.
+func (service *Service) Mkdir(ctx context.Context, request MkdirRequest) (MkdirResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return MkdirResponse{}, err
+	}
+	path, err := service.mutationPath(request.Path, "workspacefs.mkdir")
+	if err != nil {
+		return MkdirResponse{}, err
+	}
+	root, err := os.OpenRoot(service.root)
+	if err != nil {
+		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
+	}
+	defer func() { _ = root.Close() }()
+	if request.Parents {
+		err = root.MkdirAll(path, 0700)
+	} else {
+		err = root.Mkdir(path, 0700)
+	}
+	if err != nil {
+		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
+	}
+	return MkdirResponse{Path: filepath.ToSlash(path)}, nil
+}
+
+// RemoveRequest controls workspace file or directory removal.
+type RemoveRequest struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+// RemoveResponse describes the removed workspace path.
+type RemoveResponse struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+// Remove removes one workspace path, recursively only when requested.
+func (service *Service) Remove(ctx context.Context, request RemoveRequest) (RemoveResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return RemoveResponse{}, err
+	}
+	path, err := service.mutationPath(request.Path, "workspacefs.remove")
+	if err != nil {
+		return RemoveResponse{}, err
+	}
+	root, err := os.OpenRoot(service.root)
+	if err != nil {
+		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
+	}
+	defer func() { _ = root.Close() }()
+	if request.Recursive {
+		err = root.RemoveAll(path)
+	} else {
+		err = root.Remove(path)
+	}
+	if err != nil {
+		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
+	}
+	return RemoveResponse{Path: filepath.ToSlash(path), Recursive: request.Recursive}, nil
+}
+
 // RegisterTools exposes the filesystem service through the normalized tool registry.
 func RegisterTools(registry *tools.Registry, service *Service) error {
-	definitions := []toolAdapter{
+	definitions := append(readOnlyAdapters(service), mutationAdapters(service)...)
+	return registerToolAdapters(registry, definitions)
+}
+
+func registerToolAdapters(registry *tools.Registry, definitions []toolAdapter) error {
+	for _, adapter := range definitions {
+		if err := registry.Register(adapter); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readOnlyAdapters(service *Service) []toolAdapter {
+	return []toolAdapter{
 		{name: "fs.list", description: "List bounded workspace entries.", parameters: `{"type":"object"}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ListRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
@@ -423,23 +645,55 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			return service.Hash(ctx, request)
 		}},
 	}
-	for _, adapter := range definitions {
-		if err := registry.Register(adapter); err != nil {
-			return err
-		}
+}
+
+func mutationAdapters(service *Service) []toolAdapter {
+	return []toolAdapter{
+		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request WriteRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.Write(ctx, request)
+		}},
+		{name: "fs.move", description: "Move one workspace file or directory without replacing an existing destination.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request MoveRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.Move(ctx, request)
+		}},
+		{name: "fs.mkdir", description: "Create a workspace directory. Use parents=true for nested directory structures.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"parents":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request MkdirRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.Mkdir(ctx, request)
+		}},
+		{name: "fs.remove", description: "Remove one workspace file or directory. Set recursive=true only when removing a directory tree is intended.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskDestructive, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request RemoveRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.Remove(ctx, request)
+		}},
 	}
-	return nil
 }
 
 type toolAdapter struct {
 	name        string
 	description string
 	parameters  string
+	risk        tools.Risk
 	execute     func(context.Context, tools.Call) (any, error)
 }
 
 func (adapter toolAdapter) Definition() tools.Definition {
-	return tools.Definition{Name: adapter.name, Description: adapter.description, Parameters: json.RawMessage(adapter.parameters), Risk: tools.RiskReadOnly, Timeout: 30_000_000_000, MaxOutputBytes: defaultMaxBytes, MaxArguments: 8}
+	risk := adapter.risk
+	if risk == "" {
+		risk = tools.RiskReadOnly
+	}
+	return tools.Definition{Name: adapter.name, Description: adapter.description, Parameters: json.RawMessage(adapter.parameters), Risk: risk, Timeout: 30_000_000_000, MaxOutputBytes: defaultMaxBytes, MaxArguments: 8}
 }
 
 func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.Result {
@@ -459,6 +713,21 @@ func (service *Service) resolveExisting(path string) (relativePath string, absol
 		return "", "", normalizeFilesystemError("workspacefs.path", err)
 	}
 	return relativePath, absolutePath, nil
+}
+
+func (service *Service) mutationPath(path, operation string) (string, error) {
+	if path == "" || filepath.IsAbs(path) {
+		return "", apperr.New(apperr.KindTool, operation, "a non-empty workspace-relative path is required")
+	}
+	cleanPath := filepath.Clean(filepath.FromSlash(path))
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", apperr.New(apperr.KindTool, operation, "path must stay below the workspace")
+	}
+	relativePath := filepath.ToSlash(cleanPath)
+	if relativePath == ".git" || strings.HasPrefix(relativePath, ".git/") {
+		return "", apperr.New(apperr.KindPolicy, operation, "Git metadata paths are not writable")
+	}
+	return relativePath, nil
 }
 
 func (service *Service) resolve(path string) (relativePath string, absolutePath string, err error) {

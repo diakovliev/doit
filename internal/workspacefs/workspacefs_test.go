@@ -70,6 +70,92 @@ func TestRejectsWorkspaceEscape(t *testing.T) {
 	}
 }
 
+func TestMkdirAndRemoveDirectoryTree(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	created, err := service.Mkdir(context.Background(), MkdirRequest{Path: "nested/dir", Parents: true})
+	if err != nil || created.Path != "nested/dir" {
+		t.Fatalf("unexpected mkdir response: %+v, error=%v", created, err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "nested", "dir", "file.txt"), "content")
+	if _, err := service.Remove(context.Background(), RemoveRequest{Path: "nested/dir"}); err == nil {
+		t.Fatal("expected non-recursive directory removal to fail")
+	}
+	removed, err := service.Remove(context.Background(), RemoveRequest{Path: "nested", Recursive: true})
+	if err != nil || removed.Path != "nested" || !removed.Recursive {
+		t.Fatalf("unexpected remove response: %+v, error=%v", removed, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("directory tree still exists: %v", err)
+	}
+}
+
+func TestWriteAndMoveFilesAndDirectories(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	writeAndMoveFile(t, service)
+	writeAndMoveDirectory(t, service, root)
+}
+
+func writeAndMoveFile(t *testing.T, service *Service) {
+	t.Helper()
+	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "first", Parents: true})
+	if err != nil || !written.Created || written.Bytes != 5 {
+		t.Fatalf("unexpected write response: %+v, error=%v", written, err)
+	}
+	if _, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second"}); err == nil {
+		t.Fatal("expected overwrite protection")
+	}
+	written, err = service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second", Overwrite: true})
+	if err != nil || !written.Overwrote {
+		t.Fatalf("unexpected overwrite response: %+v, error=%v", written, err)
+	}
+	if _, err := service.Move(context.Background(), MoveRequest{From: "nested/file.txt", To: "nested/moved.txt"}); err != nil {
+		t.Fatalf("move file: %v", err)
+	}
+}
+
+func writeAndMoveDirectory(t *testing.T, service *Service, root string) {
+	t.Helper()
+	if _, err := service.Mkdir(context.Background(), MkdirRequest{Path: "tree"}); err != nil {
+		t.Fatalf("make directory: %v", err)
+	}
+	if _, err := service.Write(context.Background(), WriteRequest{Path: "tree/file.txt", Content: "tree file"}); err != nil {
+		t.Fatalf("write directory file: %v", err)
+	}
+	if _, err := service.Move(context.Background(), MoveRequest{From: "tree", To: "moved-tree"}); err != nil {
+		t.Fatalf("move directory: %v", err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open moved workspace: %v", err)
+	}
+	contents, err := rootHandle.ReadFile("moved-tree/file.txt")
+	_ = rootHandle.Close()
+	if err != nil || string(contents) != "tree file" {
+		t.Fatalf("unexpected moved directory content: %q, error=%v", contents, err)
+	}
+}
+
+func TestMkdirAndRemoveRejectWorkspaceRootAndGitMetadata(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.Mkdir(context.Background(), MkdirRequest{Path: "."}); err == nil {
+		t.Fatal("expected workspace root mkdir to fail")
+	}
+	if _, err := service.Remove(context.Background(), RemoveRequest{Path: ".git", Recursive: true}); err == nil {
+		t.Fatal("expected Git metadata removal to fail")
+	}
+}
+
 func TestRegisterTools(t *testing.T) {
 	service, err := New(t.TempDir())
 	if err != nil {
@@ -79,8 +165,14 @@ func TestRegisterTools(t *testing.T) {
 	if err := RegisterTools(registry, service); err != nil {
 		t.Fatalf("register filesystem tools: %v", err)
 	}
-	if len(registry.Definitions()) != 5 {
-		t.Fatalf("expected five filesystem tools, got %d", len(registry.Definitions()))
+	if len(registry.Definitions()) != 9 {
+		t.Fatalf("expected nine filesystem tools, got %d", len(registry.Definitions()))
+	}
+	for _, name := range []string{"fs.write", "fs.move", "fs.mkdir", "fs.remove"} {
+		tool, exists := registry.Lookup(name)
+		if !exists || len(tool.Definition().Parameters) == 0 {
+			t.Fatalf("directory tool is not registered with a schema: %s", name)
+		}
 	}
 }
 
