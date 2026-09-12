@@ -195,6 +195,21 @@ go run . --profile ollama --ephemeral --timeout 10m run "Inspect main.go and sum
 
 A model may answer normal text requests while still failing tool workflows. Coding tasks that require filesystem or process tools need a model/backend that emits Responses `function_call` items rather than prose that merely describes a hypothetical tool call.
 
+## Repository Guidance
+
+Before each model request, `doit` loads bounded repository guidance when the files exist:
+
+- `.github/copilot-instructions.md`
+- `AGENTS.md`
+- `.github/instructions/*.instructions.md`
+- `.github/skills/*/SKILL.md`
+- `.agents/skills/*/SKILL.md`
+- `.doit/instructions.md`
+- `.doit/instructions/*.md`
+- `.doit/skills/*/SKILL.md`
+
+Instruction files are supplied as repository instructions, and skill files are supplied as repository skills with their source paths. Directory entries are loaded in deterministic order. Each file and the combined guidance have bounded sizes. Other `.doit` state, including sessions and configuration, is not automatically supplied as guidance.
+
 ## Microsoft Foundry
 
 The adapter uses the OpenAI-compatible Foundry endpoint directly:

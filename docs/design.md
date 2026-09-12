@@ -159,12 +159,17 @@ The orchestrator should not know provider-specific request formats or shell-spec
 The context builder creates bounded, relevant input for the model. It may combine:
 
 - The user's request and session history.
+- Repository instructions and skills from the supported `.github`, `AGENTS.md`, `.agents/skills`, and `.doit` guidance locations.
 - Repository status and relevant file paths.
 - Focused file contents and nearby implementation context.
 - Existing documentation and project instructions.
 - Results from approved inspection or validation tools.
 
 Context selection should be explicit and inspectable. The builder must avoid sending secrets, unnecessarily large files, ignored artifacts, or unrelated repository content. It must enforce an input-token budget before a request is sent.
+
+When session history is trimmed to fit the input budget, function-call and function-call-output items must be removed as an atomic pair. Resumed history must discard orphaned or incomplete tool items before a provider request so the Responses API never receives a function output without its matching call.
+
+Repository guidance discovery is an explicit allowlist. It reads `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
 
 ### 4.4 Model Client Adapter
 
