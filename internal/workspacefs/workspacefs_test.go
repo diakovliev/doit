@@ -12,7 +12,7 @@ import (
 
 func TestReadSearchHashAndListStayBounded(t *testing.T) {
 	root := t.TempDir()
-	writeWorkspaceFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+	writeWorkspaceFile(t, filepath.Join(root, "source.txt"), "source\nentrypoint\n")
 	writeWorkspaceFile(t, filepath.Join(root, "notes.txt"), "find-me\nsecond line\n")
 	writeWorkspaceFile(t, filepath.Join(root, ".gitignore"), "ignored.txt\n")
 	writeWorkspaceFile(t, filepath.Join(root, "ignored.txt"), "find-me\n")
@@ -30,8 +30,8 @@ func TestReadSearchHashAndListStayBounded(t *testing.T) {
 
 func requireRead(ctx context.Context, t *testing.T, service *Service) {
 	t.Helper()
-	response, err := service.Read(ctx, ReadRequest{Path: "main.go", MaxBytes: 12})
-	if err != nil || !response.Truncated || !strings.Contains(response.Content, "package") {
+	response, err := service.Read(ctx, ReadRequest{Path: "source.txt", MaxBytes: 12})
+	if err != nil || !response.Truncated || !strings.Contains(response.Content, "source") {
 		t.Fatalf("unexpected read response: %+v, error=%v", response, err)
 	}
 }

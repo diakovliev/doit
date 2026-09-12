@@ -36,11 +36,11 @@ func newGitFixture(t *testing.T) string {
 	if err := os.WriteFile(filePath, []byte("hello\n"), 0600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	mainPath := filepath.Join(root, "main.go")
-	if err := os.WriteFile(mainPath, []byte("package main\n"), 0600); err != nil {
-		t.Fatalf("write main fixture: %v", err)
+	entryPath := filepath.Join(root, "entry.txt")
+	if err := os.WriteFile(entryPath, []byte("entrypoint\n"), 0600); err != nil {
+		t.Fatalf("write entry fixture: %v", err)
 	}
-	runGit(t, root, "add", "README.md", "main.go")
+	runGit(t, root, "add", "README.md", "entry.txt")
 	runGit(t, root, "commit", "-m", "initial")
 	if err := os.WriteFile(filePath, []byte("hello\nchanged\n"), 0600); err != nil {
 		t.Fatalf("update fixture: %v", err)
@@ -116,7 +116,7 @@ func TestGitCommitReportsCurrentPathsWhenSelectionIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
-	_, err = service.Commit(context.Background(), CommitRequest{Message: "wrong selection", Paths: []string{"main.go"}})
+	_, err = service.Commit(context.Background(), CommitRequest{Message: "wrong selection", Paths: []string{"entry.txt"}})
 	if err == nil || !strings.Contains(err.Error(), "README.md") {
 		t.Fatalf("expected current changed path diagnostic, error=%v", err)
 	}

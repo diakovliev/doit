@@ -46,13 +46,13 @@ func writeGuidanceFixture(t *testing.T, root string) {
 		}
 	}
 	files := map[string]string{
-		".github/copilot-instructions.md":         "Follow repository rules.",
-		".github/instructions/go.instructions.md": "Use Go conventions.",
-		".github/skills/review/SKILL.md":          "Review changed code.",
-		".doit/instructions.md":                   "Use local project rules.",
-		".doit/instructions/testing.md":           "Run focused tests first.",
-		".doit/skills/testing/SKILL.md":           "Prefer deterministic tests.",
-		"README.md":                               "repository contents",
+		".github/copilot-instructions.md":              "Follow repository rules.",
+		".github/instructions/project.instructions.md": "Use project conventions.",
+		".github/skills/review/SKILL.md":               "Review changed code.",
+		".doit/instructions.md":                        "Use local project rules.",
+		".doit/instructions/testing.md":                "Run focused tests first.",
+		".doit/skills/testing/SKILL.md":                "Prefer deterministic tests.",
+		"README.md":                                    "repository contents",
 	}
 	for path, content := range files {
 		writeContextFile(t, filepath.Join(root, path), content)
@@ -112,7 +112,7 @@ func hasOrphanedToolOutput(input []model.InputItem) bool {
 
 func assertGuidance(t *testing.T, instructions string) {
 	t.Helper()
-	for _, expected := range []string{"Follow repository rules.", "Use Go conventions.", "Review changed code.", "Use local project rules.", "Run focused tests first.", "Prefer deterministic tests."} {
+	for _, expected := range []string{"Follow repository rules.", "Use project conventions.", "Review changed code.", "Use local project rules.", "Run focused tests first.", "Prefer deterministic tests."} {
 		if !strings.Contains(instructions, expected) {
 			t.Fatalf("expected guidance %q in instructions: %s", expected, instructions)
 		}
