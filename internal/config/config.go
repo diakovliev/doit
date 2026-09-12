@@ -41,6 +41,13 @@ type TokenBudget struct {
 	MaxSessionTokens int `json:"max_session_tokens"`
 }
 
+// TaskConfig describes one project-defined allowlisted process task.
+type TaskConfig struct {
+	Executable  string   `json:"executable"`
+	Arguments   []string `json:"arguments,omitempty"`
+	Environment []string `json:"environment,omitempty"`
+}
+
 // Config is the effective configuration after all sources are merged.
 type Config struct {
 	Workspace string                    `json:"workspace"`
@@ -48,6 +55,7 @@ type Config struct {
 	Format    string                    `json:"format"`
 	Ephemeral bool                      `json:"ephemeral"`
 	Profiles  map[string]BackendProfile `json:"profiles"`
+	Tasks     map[string]TaskConfig     `json:"tasks"`
 	Token     TokenBudget               `json:"token"`
 }
 
@@ -75,6 +83,7 @@ type fileConfig struct {
 	Profiles       map[string]BackendProfile `json:"profiles"`
 	Format         string                    `json:"format"`
 	Ephemeral      *bool                     `json:"ephemeral"`
+	Tasks          map[string]TaskConfig     `json:"tasks"`
 	Token          TokenBudget               `json:"token"`
 }
 
@@ -135,6 +144,7 @@ func defaultConfig(workspace string) Config {
 		Profile:   "default",
 		Format:    "human",
 		Profiles:  make(map[string]BackendProfile),
+		Tasks:     make(map[string]TaskConfig),
 		Token:     DefaultTokenBudget(),
 	}
 }
@@ -229,6 +239,9 @@ func applyFileConfig(result *Config, loaded fileConfig) {
 	for name, profile := range loaded.Profiles {
 		profile.APIRoot = strings.TrimRight(profile.APIRoot, "/")
 		result.Profiles[name] = profile
+	}
+	for name, task := range loaded.Tasks {
+		result.Tasks[name] = task
 	}
 	if loaded.Format != "" {
 		result.Format = loaded.Format

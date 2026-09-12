@@ -14,6 +14,7 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
   "default_profile": "project",
   "format": "human",
   "profiles": {"project": {"api_root": "https://project.example/v1", "model": "project-model"}},
+	"tasks": {"probe": {"executable": "git", "arguments": ["--version"]}},
   "token": {"max_input_tokens": 1000}
 }`)
 	writeConfigFile(t, userFile, `{
@@ -37,6 +38,9 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
 	}
 	if configuration.Token.MaxInputTokens != 1000 || configuration.Token.MaxOutputTokens != 2000 {
 		t.Fatalf("unexpected token budgets: %+v", configuration.Token)
+	}
+	if configuration.Tasks["probe"].Executable != "git" {
+		t.Fatalf("expected configured project task: %+v", configuration.Tasks)
 	}
 	profile, err := configuration.SelectedProfile()
 	if err != nil {
