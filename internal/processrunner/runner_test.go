@@ -59,7 +59,7 @@ func TestProcessToolAdvertisesAndExecutesAllowlistedTask(t *testing.T) {
 	if !contains(schema.Properties["task"].Enum, "echo") {
 		t.Fatalf("process schema omitted echo task: %+v", schema.Properties["task"].Enum)
 	}
-	result := tool.Execute(context.Background(), tools.Call{Name: "process.run", Arguments: []byte(`{"task":"echo","args":["hello"]}`)})
+	result := tool.Execute(context.Background(), tools.Call{Name: "process.run", Arguments: []byte(`{"task":"echo","args":["hello"],"timeout":"1s"}`)})
 	if result.Status != tools.StatusSucceeded {
 		t.Fatalf("process tool failed: %+v", result)
 	}

@@ -102,7 +102,7 @@ type processTool struct {
 
 func (tool processTool) Definition() tools.Definition {
 	taskNames := tool.runner.taskNames()
-	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Use a task name from the advertised enum, not an executable or shell command.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Choose the task name and, when needed, a human-readable timeout such as 5m; the caller's outer deadline still applies.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
 }
 
 func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Result {
@@ -128,7 +128,10 @@ func (runner *Runner) prepare(task process.Task) (Definition, string, time.Durat
 	}
 	timeout := task.Timeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = process.DefaultTaskTimeout
+	}
+	if timeout > process.MaximumTaskTimeout {
+		return Definition{}, "", 0, apperr.New(apperr.KindPolicy, "processrunner.run", "task timeout exceeds maximum of "+process.MaximumTaskTimeout.String())
 	}
 	return definition, workingDirectory, timeout, nil
 }
@@ -143,13 +146,14 @@ func (runner *Runner) taskNames() []string {
 }
 
 func processParameters(taskNames []string) json.RawMessage {
+	availableTasks := strings.Join(taskNames, ", ")
 	parameters := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task":              map[string]any{"type": "string", "enum": taskNames},
+			"task":              map[string]any{"type": "string", "enum": taskNames, "description": "Configured task name. Available tasks: " + availableTasks},
 			"args":              map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
 			"working_directory": map[string]string{"type": "string"},
-			"timeout":           map[string]any{"type": "integer", "minimum": 0},
+			"timeout":           map[string]string{"type": "string", "description": "Optional model-selected duration such as 30s or 5m; maximum 10m. The outer CLI deadline still applies."},
 		},
 		"required": []string{"task"},
 	}
