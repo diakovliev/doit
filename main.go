@@ -1,8 +1,12 @@
 // Package main provides the doit command-line entrypoint.
 package main
 
-import "fmt"
+import (
+	"os"
+
+	"github.com/diakovliev/doit/internal/cli"
+)
 
 func main() {
-	fmt.Println("Hello, World!")
+	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }

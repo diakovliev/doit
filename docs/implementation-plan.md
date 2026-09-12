@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Phase 0 complete; Phase 1 not started
+**Status:** Phase 2 Local Tools and Persistence complete; Phase 3 not started
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -121,23 +121,23 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
-| `FOUND-001` | Establish the Go package layout and core error types. | `DEC-003` | Packages have clear ownership, errors preserve cause and category, and the empty application still builds. | `TODO` |
-| `FOUND-002` | Implement configuration loading and backend profiles. | `DEC-002` | Defaults, file configuration, environment overrides, flags, credential references, and validation are tested. | `TODO` |
-| `FOUND-003` | Implement the CLI root, global options, help, version, command dispatch, and stable exit codes. | `DEC-002`, `DEC-008` | `doit`, `doit run`, `doit agent`, `--format`, `--directory`, `--profile`, `--ephemeral`, and invalid-input paths behave as documented. | `TODO` |
-| `FOUND-004` | Implement the normalized tool contract and registry. | `DEC-003`, `DEC-004` | Tools register schemas, risk classes, limits, cancellation behavior, and normalized results. | `TODO` |
-| `FOUND-005` | Implement deterministic fake model and process clients. | `DEC-003`, `DEC-009` | Unit and integration tests can run model/tool loops without credentials or network access. | `TODO` |
-| `FOUND-006` | Implement token accounting primitives. | `DEC-006` | Every request creates usage counters, provider usage reconciles estimates, streaming does not double-count, and cumulative totals are testable. | `TODO` |
+| `FOUND-001` | Establish the Go package layout and core error types. | `DEC-003` | Packages have clear ownership, errors preserve cause and category, and the empty application still builds. | `DONE` |
+| `FOUND-002` | Implement configuration loading and backend profiles. | `DEC-002` | Defaults, file configuration, environment overrides, flags, credential references, and validation are tested. | `DONE` |
+| `FOUND-003` | Implement the CLI root, global options, help, version, command dispatch, and stable exit codes. | `DEC-002`, `DEC-008` | `doit`, `doit run`, `doit agent`, `--format`, `--directory`, `--profile`, `--ephemeral`, and invalid-input paths behave as documented. | `DONE` |
+| `FOUND-004` | Implement the normalized tool contract and registry. | `DEC-003`, `DEC-004` | Tools register schemas, risk classes, limits, cancellation behavior, and normalized results. | `DONE` |
+| `FOUND-005` | Implement deterministic fake model and process clients. | `DEC-003`, `DEC-009` | Unit and integration tests can run model/tool loops without credentials or network access. | `DONE` |
+| `FOUND-006` | Implement token accounting primitives. | `DEC-006` | Every request creates usage counters, provider usage reconciles estimates, and cumulative totals are testable; streaming-specific accounting is deferred to `MODEL-002`. | `DONE` |
 
 ## Phase 2: Local Tools and Persistence
 
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
-| `TOOL-001` | Implement bounded filesystem inspection. | `FOUND-004`, `DEC-004`, `DEC-007` | `fs.list`, `fs.stat`, `fs.read`, `fs.search`, and `fs.hash` enforce workspace, ignore, symlink, size, and cancellation rules. | `TODO` |
-| `TOOL-002` | Implement structured Git inspection. | `TOOL-001`, `DEC-007` | `git.root`, `git.status`, `git.diff`, `git.log`, `git.show`, `git.blame`, and `git.check_ignore` return structured fixture results and refuse unsupported scope. | `TODO` |
-| `TOOL-003` | Implement the allowlisted process runner. | `FOUND-004`, `DEC-005`, `DEC-008` | Named test, format, lint, security, vet, and build tasks enforce arguments, environment, working directory, timeout, cancellation, and output limits. | `TODO` |
-| `TOOL-004` | Implement patch validation, preview, application, rename, and formatter integration. | `TOOL-001`, `TOOL-003`, `DEC-004`, `DEC-005` | `code.check_patch`, `code.apply_patch`, `code.rename`, and `code.format` detect conflicts, produce diffs, use atomic writes, and never bypass approval. | `TODO` |
-| `POL-001` | Implement approval and safety policy evaluation. | `FOUND-004`, `TOOL-001`, `TOOL-002`, `TOOL-003`, `TOOL-004`, `DEC-005` | Automatic, confirmation, denied, cancelled, and non-interactive decisions are visible and tested. | `TODO` |
-| `SESSION-001` | Implement project-local session persistence. | `FOUND-006`, `DEC-006`, `DEC-007` | Manifests, ordered events, results, continuation data, locks, redaction, bounded output, atomic writes, recovery, and `--ephemeral` are tested below the effective invocation path. | `TODO` |
+| `TOOL-001` | Implement bounded filesystem inspection. | `FOUND-004`, `DEC-004`, `DEC-007` | `fs.list`, `fs.stat`, `fs.read`, `fs.search`, and `fs.hash` enforce workspace, ignore, symlink, size, and cancellation rules. | `DONE` |
+| `TOOL-002` | Implement structured Git inspection. | `TOOL-001`, `DEC-007` | `git.root`, `git.status`, `git.diff`, `git.log`, `git.show`, `git.blame`, and `git.check_ignore` return structured fixture results and refuse unsupported scope. | `DONE` |
+| `TOOL-003` | Implement the allowlisted process runner. | `FOUND-004`, `DEC-005`, `DEC-008` | Named test, format, lint, security, vet, and build tasks enforce arguments, environment, working directory, timeout, cancellation, and output limits. | `DONE` |
+| `TOOL-004` | Implement patch validation, preview, application, rename, and formatter integration. | `TOOL-001`, `TOOL-003`, `DEC-004`, `DEC-005` | `code.check_patch`, `code.apply_patch`, `code.rename`, and `code.format` detect conflicts, produce diffs, use atomic writes, and never bypass approval. | `DONE` |
+| `POL-001` | Implement approval and safety policy evaluation. | `FOUND-004`, `TOOL-001`, `TOOL-002`, `TOOL-003`, `TOOL-004`, `DEC-005` | Automatic, confirmation, denied, cancelled, and non-interactive decisions are visible and tested. | `DONE` |
+| `SESSION-001` | Implement project-local session persistence. | `FOUND-006`, `DEC-006`, `DEC-007` | Manifests, ordered events, results, continuation data, locks, redaction, bounded output, atomic writes, recovery, and `--ephemeral` are tested below the effective invocation path. | `DONE` |
 
 ## Phase 3: Model and Orchestration
 
@@ -180,3 +180,5 @@ Deferred work must not change the approval, observability, token accounting, ses
 | --- | --- | --- | --- |
 | 2026-09-12 | `PLAN-001` | Created the initial trackable implementation plan from the project design. | This document |
 | 2026-09-12 | `DEC-001`-`DEC-009` | Frozen the Safe Local MVP compatibility, configuration, contracts, tool schemas, approvals, token accounting, Git scope, platform, and fake-backend decisions. | [Phase 0 Decision Record](#phase-0-decision-record); [design open decisions](design.md#11-open-decisions) |
+| 2026-09-12 | `FOUND-001`-`FOUND-006` | Implemented the Phase 1 Foundation packages, CLI shell, configuration loader, tool and policy contracts, fake clients, session contracts, and token accounting. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `TOOL-001`-`TOOL-004`, `POL-001`, `SESSION-001` | Implemented bounded filesystem and Git inspection, allowlisted process execution, reviewable code operations, approval coverage, and persistent/ephemeral sessions. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
