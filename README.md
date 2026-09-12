@@ -123,8 +123,8 @@ The following names are recognized for future workflow implementations: `develop
 | `--new-session` / `--no-resume` | Start a fresh durable session instead of reusing the latest one. | `doit --new-session run "Start a separate review"` |
 | `--timeout <duration>` | Set the request context deadline. | `doit --timeout 10m run "Review the repository"` |
 | `--no-color` | Disable terminal styling. | `doit --no-color run "Summarize"` |
-| `--quiet` | Reserved output-control flag. | `doit --quiet run "Summarize"` |
-| `--verbose` | Reserved diagnostic-output flag. | `doit --verbose run "Summarize"` |
+| `--quiet` | Reserved output-control flag (currently non-functional). | `doit --quiet run "Summarize"` |
+| `--verbose` | Reserved diagnostic-output flag (currently non-functional). | `doit --verbose run "Summarize"` |
 
 Use `--` when you need to terminate global option parsing before arguments:
 
@@ -266,7 +266,7 @@ Finished repository inspection.
 session=... input_tokens=... output_tokens=... total_tokens=... source=provider exact=true
 ```
 
-Progress messages do not include credentials, prompts, or raw tool arguments. `--format json` is intended for automation and writes the final result object without human progress lines.
+Progress messages do not include credentials, prompts, or raw tool arguments. JSON output (`--format json`) is intended for automation and writes the final result object without human progress lines.
 
 ## Tools
 
