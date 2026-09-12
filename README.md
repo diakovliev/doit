@@ -249,7 +249,7 @@ Filesystem inspection:
 - `fs.search`
 - `fs.hash`
 
-Git inspection:
+Git inspection and local operations:
 
 - `git.root`
 - `git.status`
@@ -258,6 +258,12 @@ Git inspection:
 - `git.show`
 - `git.blame`
 - `git.check_ignore`
+- `git.stage`
+- `git.unstage`
+- `git.commit`
+- `git.restore`
+
+Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. Agent mode asks for approval; `doit run` can automate these local operations. Remote operations and arbitrary Git command composition are not exposed.
 
 Code and validation:
 
@@ -270,6 +276,8 @@ Code and validation:
 The built-in `code.format` task is named `format` and runs `gofmt -w`. Pass workspace-relative Go files in `arguments`, such as `["main.go"]`. Use `format-check` with the same file arguments to list files that need formatting without changing them.
 
 `process.run` accepts a configured task name, not an executable or shell command. The model-facing schema advertises the tasks available in the current environment, typically `test`, `vet`, `format`, `format-check`, `lint`, and `security`; pass extra arguments through `args`, for example `{"task":"test","args":[]}`. Providers that reject dotted tool names see this tool as `process_run`, which is mapped back to `process.run` before execution.
+
+The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
 Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is the automation path: it allows local workspace changes and configured process tasks without prompting, while tool-level path confinement, network rejection, and command allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
 

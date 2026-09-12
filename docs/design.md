@@ -109,7 +109,7 @@ The following global options are reserved for consistent behavior across command
 - `--format <human|json>`: Select terminal output or a stable machine-readable result format.
 - `--no-color`: Disable ANSI styling.
 - `--quiet` and `--verbose`: Adjust progress and diagnostic detail.
-- `--timeout <duration>`: Override the request or task timeout within configured limits.
+- `--timeout <duration>`: Set a caller-controlled hard deadline for the request; the model may choose shorter per-process deadlines, but cannot extend this limit.
 - `--ephemeral`: Do not write durable session data; the session can run but cannot be resumed after exit.
 - `-h, --help` and `--version`: Show help or version information.
 
@@ -329,18 +329,17 @@ Git inspection must report the repository root when it differs from the effectiv
 
 - `process.run`: Execute a named configured task such as `test`, `format-check`, `lint`, `vet`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
 
-The model may select a configured task and parameters, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
+The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
 
 #### Explicit Git Write Operations
 
-Git writes are not required for the read-only MVP. If enabled later, they must be separate tools with stronger policy checks:
+Local Git mutations are first-class workspace tools with structured arguments and stronger policy checks:
 
-- `git.stage` and `git.unstage`: Change the index for explicitly selected paths.
-- `git.commit`: Create a commit only after showing the staged diff and receiving explicit approval of the message and path set.
-- `git.restore`: Restore selected paths only with an explicit confirmation because it can discard work.
-- `git.branch`: Create or switch branches only through a user-requested workflow.
+- `git.stage` and `git.unstage`: Change the index for explicitly selected workspace paths.
+- `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing and never includes unrelated paths.
+- `git.restore`: Restore explicitly selected paths from the index or `HEAD`; worktree restoration is destructive.
 
-The core agent must not push, force-push, reset history, rewrite commits, merge branches, or alter remotes. A future release may add narrowly scoped operations, but those actions must remain opt-in and separately auditable.
+`doit agent` confirms these operations individually. `doit run` may execute them as explicit workspace automation, while path confinement and Git validation remain active. The core agent must not push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, or alter remotes. Those operations remain outside the local automation contract.
 
 ### 4.6 Approval and Safety Policy
 
