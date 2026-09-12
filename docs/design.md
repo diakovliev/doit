@@ -306,8 +306,12 @@ The actual Go types may differ, but the status distinction and bounded diagnosti
 - `fs.read`: Read a bounded text range or return safe metadata for binary content. The caller must provide byte or line limits.
 - `fs.search`: Search text, symbols, or paths with a query, path scope, glob, ignore policy, and result limit.
 - `fs.hash`: Calculate a bounded file or path-set hash for change detection and patch concurrency checks.
+- `fs.write`: Create or explicitly overwrite one bounded workspace file, with optional parent creation.
+- `fs.move`: Move one workspace file or directory without replacing an existing destination.
+- `fs.mkdir`: Create one workspace directory, optionally creating missing parents.
+- `fs.remove`: Remove one workspace path, requiring an explicit recursive flag for directory trees.
 
-Filesystem tools must respect project instructions and ignore rules by default. Access to ignored files, `.doit/`, credentials, and files outside the workspace requires an explicit user request and policy approval.
+Filesystem tools must respect project instructions and ignore rules by default. File and directory mutations use rooted workspace operations, reject the workspace root and `.git` metadata, refuse replacement moves, bound direct file writes to 64 KiB, and carry write or destructive risk metadata. Larger or review-sensitive file changes should use `code.apply_patch`. Access to ignored files, `.doit/`, credentials, and files outside the workspace requires an explicit user request and policy approval.
 
 **Code manipulation** is separate from filesystem reading so every write has a reviewable operation:
 
