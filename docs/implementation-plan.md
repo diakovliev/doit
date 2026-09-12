@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Phase 2 Local Tools and Persistence complete; Phase 3 not started
+**Status:** Phase 3 core complete; Phase 4 not started
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -143,12 +143,12 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
-| `MODEL-001` | Implement the OpenAI-compatible HTTP Responses adapter. | `FOUND-002`, `FOUND-005`, `FOUND-006`, `DEC-001`, `DEC-009` | API-root joining, bearer credentials, request IDs, text output, function calls, function results, errors, timeouts, and usage reconciliation pass fake-backend tests. | `TODO` |
-| `MODEL-002` | Implement streaming support if accepted in `DEC-001`. | `MODEL-001`, `DEC-009` | SSE deltas, terminal events, cancellation, partial output, and usage reconciliation produce the same normalized events as non-streaming requests. | `TODO` |
-| `CONTEXT-001` | Implement the bounded context builder. | `TOOL-001`, `FOUND-006`, `SESSION-001` | Instructions, project guidance, user input, selected files, Git state, and tool results are selected within token and privacy budgets. | `TODO` |
-| `AGENT-001` | Implement the model/tool orchestration loop. | `MODEL-001`, `FOUND-004`, `POL-001`, `SESSION-001`, `CONTEXT-001` | The loop handles text, function calls, approval, normalized results, retries, cancellation, incomplete responses, session events, and final summaries. | `TODO` |
-| `CLI-001` | Connect `doit run` and `doit agent` to the orchestration loop. | `FOUND-003`, `AGENT-001` | Human and JSON output, stdin requests, interactive prompts, errors, token usage, changed paths, and exit codes match the CLI design. | `TODO` |
-| `MVP-001` | Prove the end-to-end MVP acceptance scenario. | `CLI-001`, `MODEL-001`, `TOOL-001`, `TOOL-003`, `TOOL-004`, `SESSION-001` | The documented `doit run "explain this repository"` fake-backend scenario passes without credentials or network access. | `TODO` |
+| `MODEL-001` | Implement the OpenAI-compatible HTTP Responses adapter. | `FOUND-002`, `FOUND-005`, `FOUND-006`, `DEC-001`, `DEC-009` | API-root joining, bearer credentials, request IDs, text output, function calls, function results, errors, timeouts, and usage reconciliation pass fake-backend tests. | `DONE` |
+| `MODEL-002` | Implement streaming support if accepted in `DEC-001`. | `MODEL-001`, `DEC-009` | SSE deltas, terminal events, cancellation, partial output, and usage reconciliation produce the same normalized events as non-streaming requests. | `DEFERRED` |
+| `CONTEXT-001` | Implement the bounded context builder. | `TOOL-001`, `FOUND-006`, `SESSION-001` | Instructions, project guidance, user input, selected files, Git state, and tool results are selected within token and privacy budgets. | `DONE` |
+| `AGENT-001` | Implement the model/tool orchestration loop. | `MODEL-001`, `FOUND-004`, `POL-001`, `SESSION-001`, `CONTEXT-001` | The loop handles text, function calls, approval, normalized results, retries, cancellation, incomplete responses, session events, and final summaries. | `DONE` |
+| `CLI-001` | Connect `doit run` and `doit agent` to the orchestration loop. | `FOUND-003`, `AGENT-001` | Human and JSON output, stdin requests, interactive prompts, errors, token usage, changed paths, and exit codes match the CLI design. | `DONE` |
+| `MVP-001` | Prove the end-to-end MVP acceptance scenario. | `CLI-001`, `MODEL-001`, `TOOL-001`, `TOOL-003`, `TOOL-004`, `SESSION-001` | The documented `doit run "explain this repository"` fake-backend scenario passes without credentials or network access. | `DONE` |
 
 ## Phase 4: Hardening and Workflows
 
@@ -182,3 +182,6 @@ Deferred work must not change the approval, observability, token accounting, ses
 | 2026-09-12 | `DEC-001`-`DEC-009` | Frozen the Safe Local MVP compatibility, configuration, contracts, tool schemas, approvals, token accounting, Git scope, platform, and fake-backend decisions. | [Phase 0 Decision Record](#phase-0-decision-record); [design open decisions](design.md#11-open-decisions) |
 | 2026-09-12 | `FOUND-001`-`FOUND-006` | Implemented the Phase 1 Foundation packages, CLI shell, configuration loader, tool and policy contracts, fake clients, session contracts, and token accounting. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
 | 2026-09-12 | `TOOL-001`-`TOOL-004`, `POL-001`, `SESSION-001` | Implemented bounded filesystem and Git inspection, allowlisted process execution, reviewable code operations, approval coverage, and persistent/ephemeral sessions. | `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `MODEL-001`, `CONTEXT-001`, `AGENT-001`, `CLI-001`, `MVP-001` | Implemented the Responses HTTP adapter, bounded context builder, model/tool orchestration, stdin-aware CLI composition, process validation tool, and deterministic end-to-end CLI vertical slice. `MODEL-002` remains deferred by `DEC-001`. | `git diff --check`; `go test ./...`; `go vet ./...`; `golangci-lint run`; `gosec ./...` |
+| 2026-09-12 | `RUN-001` | Validated the local Docker Ollama backend at `http://127.0.0.1:11434/v1` with `phi4-mini:latest`; simple `doit run` completed successfully, while installed models rejected tool calls or produced simulated tool prose. | Ollama Responses probe; `go run . --ephemeral --timeout 5m run "Reply with exactly: hello"`; tool-call trials with `phi4-mini`, `phi4-mini-reasoning`, and `deepseek-coder-v2` |
+| 2026-09-12 | `RUN-003` | Added bounded Foundry rate-limit retries with `Retry-After` support, jittered backoff, minimum request pacing, and distinct exhausted-throttle errors. | `go test ./internal/modelhttp`; full repository validation |

@@ -8,20 +8,20 @@ import (
 
 // Task identifies a configured process task and its bounded arguments.
 type Task struct {
-	Name             string
-	Arguments        []string
-	WorkingDirectory string
-	Timeout          time.Duration
+	Name             string        `json:"task"`
+	Arguments        []string      `json:"args,omitempty"`
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Timeout          time.Duration `json:"timeout,omitempty"`
 }
 
 // Result is the normalized outcome of a process task.
 type Result struct {
-	ExitCode  int
-	Stdout    string
-	Stderr    string
-	Duration  time.Duration
-	TimedOut  bool
-	Truncated bool
+	ExitCode  int           `json:"exit_code"`
+	Stdout    string        `json:"stdout"`
+	Stderr    string        `json:"stderr"`
+	Duration  time.Duration `json:"duration"`
+	TimedOut  bool          `json:"timed_out"`
+	Truncated bool          `json:"truncated"`
 }
 
 // Runner executes only configured tasks.

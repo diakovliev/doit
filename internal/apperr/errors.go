@@ -13,6 +13,7 @@ const (
 	KindUsage     Kind = "usage"
 	KindConfig    Kind = "config"
 	KindBackend   Kind = "backend"
+	KindRateLimit Kind = "rate-limit"
 	KindTool      Kind = "tool"
 	KindPolicy    Kind = "policy"
 	KindCancelled Kind = "cancelled"

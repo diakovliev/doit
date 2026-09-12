@@ -32,8 +32,8 @@ type Invocation struct {
 // Handler executes parsed commands. The foundation leaves model execution
 // injectable until the orchestration layer is implemented.
 type Handler interface {
-	Run(context.Context, Invocation, io.Writer) error
-	Agent(context.Context, Invocation, io.Writer) error
+	Run(context.Context, Invocation, io.Reader, io.Writer) error
+	Agent(context.Context, Invocation, io.Reader, io.Writer) error
 }
 
 // Application owns CLI versioning and command dispatch.
@@ -68,8 +68,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return (Application{Version: defaultVersion, Handler: unavailableHandler{}}).Execute(args, stdin, stdout, stderr)
 }
 
+// RunWithHandler executes the CLI with an application-owned handler.
+func RunWithHandler(args []string, stdin io.Reader, stdout, stderr io.Writer, handler Handler) int {
+	return (Application{Version: defaultVersion, Handler: handler}).Execute(args, stdin, stdout, stderr)
+}
+
 // Execute parses args, handles built-in commands, and dispatches tasks.
-func (application Application) Execute(args []string, _ io.Reader, stdout, stderr io.Writer) int {
+func (application Application) Execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	invocation, err := Parse(args)
 	if err != nil {
 		writeError(stderr, err)
@@ -101,9 +106,9 @@ func (application Application) Execute(args []string, _ io.Reader, stdout, stder
 	}
 	var executeErr error
 	if invocation.Command == "agent" {
-		executeErr = application.Handler.Agent(ctx, invocation, stdout)
+		executeErr = application.Handler.Agent(ctx, invocation, stdin, stdout)
 	} else {
-		executeErr = application.Handler.Run(ctx, invocation, stdout)
+		executeErr = application.Handler.Run(ctx, invocation, stdin, stdout)
 	}
 	if executeErr != nil {
 		writeError(stderr, executeErr)
@@ -161,10 +166,9 @@ func validateCommand(invocation *Invocation) error {
 			return usageError("agent does not accept positional arguments")
 		}
 	case "run":
-		if len(invocation.Arguments) == 0 {
-			return usageError("run requires a request")
+		if len(invocation.Arguments) > 0 {
+			invocation.Request = strings.Join(invocation.Arguments, " ")
 		}
-		invocation.Request = strings.Join(invocation.Arguments, " ")
 	case "help", "version":
 		if len(invocation.Arguments) > 0 {
 			return usageError(invocation.Command + " does not accept arguments")
@@ -240,7 +244,7 @@ func ExitCode(err error) int {
 	switch apperr.KindOf(err) {
 	case apperr.KindUsage, apperr.KindConfig:
 		return 2
-	case apperr.KindBackend:
+	case apperr.KindBackend, apperr.KindRateLimit:
 		return 3
 	case apperr.KindPolicy, apperr.KindCancelled:
 		return 4
@@ -264,10 +268,10 @@ func writeHelp(writer io.Writer) {
 
 type unavailableHandler struct{}
 
-func (unavailableHandler) Run(context.Context, Invocation, io.Writer) error {
+func (unavailableHandler) Run(context.Context, Invocation, io.Reader, io.Writer) error {
 	return apperr.New(apperr.KindInternal, "cli.run", "model execution is not wired yet")
 }
 
-func (unavailableHandler) Agent(context.Context, Invocation, io.Writer) error {
+func (unavailableHandler) Agent(context.Context, Invocation, io.Reader, io.Writer) error {
 	return apperr.New(apperr.KindInternal, "cli.agent", "agent execution is not wired yet")
 }

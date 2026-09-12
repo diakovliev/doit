@@ -21,6 +21,17 @@ type BackendProfile struct {
 	Model     string            `json:"model"`
 	APIKeyEnv string            `json:"api_key_env,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
+	RateLimit RateLimitConfig   `json:"rate_limit,omitempty"`
+}
+
+// RateLimitConfig controls bounded client-side retries after provider throttling.
+type RateLimitConfig struct {
+	MaxRetries        int `json:"max_retries,omitempty"`
+	InitialBackoffMs  int `json:"initial_backoff_ms,omitempty"`
+	MaxBackoffMs      int `json:"max_backoff_ms,omitempty"`
+	MinIntervalMs     int `json:"min_interval_ms,omitempty"`
+	TokensPerMinute   int `json:"tokens_per_minute,omitempty"`
+	RequestsPerMinute int `json:"requests_per_minute,omitempty"`
 }
 
 // TokenBudget contains request and session token limits.

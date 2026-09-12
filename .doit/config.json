@@ -1,0 +1,27 @@
+{
+  "default_profile": "foundry",
+  "profiles": {
+    "ollama": {
+      "api_root": "http://127.0.0.1:11434/v1",
+      "model": "phi4-mini:latest"
+    },
+    "foundry_deepseek": {
+      "api_root": "https://daemondeveloperfoundry.services.ai.azure.com/openai/v1",
+      "model": "DeepSeek-V4-Flash",
+      "api_key_env": "DOIT_FOUNDRY_API_KEY",
+      "rate_limit": {
+        "tokens_per_minute": 20000,
+        "requests_per_minute": 20
+      }
+    },
+    "foundry_gpt": {
+      "api_root": "https://daemondeveloperfoundry.cognitiveservices.azure.com/openai/v1",
+      "model": "gpt-5.4-nano",
+      "api_key_env": "DOIT_FOUNDRY_API_KEY",
+      "rate_limit": {
+        "tokens_per_minute": 250000,
+        "requests_per_minute": 250
+      }
+    }
+  }
+}

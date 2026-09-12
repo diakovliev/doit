@@ -4,7 +4,7 @@ import "testing"
 
 func TestRequestValidationRequiresModel(t *testing.T) {
 	if err := (Request{}).Validate(); err == nil {
-		t.Fatalf("expected missing model to fail validation")
+		t.Fatal("expected missing model to fail validation")
 	}
 }
 

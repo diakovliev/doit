@@ -150,6 +150,8 @@ The orchestrator coordinates a single task or an interactive session:
 7. Repeat until the model reaches a final response, the user cancels, or a limit is reached.
 8. Produce a final summary containing actions, changed files, validation results, and unresolved issues.
 
+The safe local MVP uses a default maximum of 32 model/tool rounds. A task that reaches the limit fails with its accumulated usage and session evidence rather than continuing indefinitely.
+
 The orchestrator should not know provider-specific request formats or shell-specific rendering details.
 
 ### 4.3 Context Builder
@@ -242,6 +244,20 @@ The default authentication mechanism is the bearer credential described by the O
 `api_root` is the complete API root, including any version or deployment path required by the backend. For example, `https://api.openai.com/v1` maps to `https://api.openai.com/v1/responses`; `doit` must not hardcode the OpenAI hostname or append an extra version segment. Local HTTP endpoints may be used only when explicitly configured. TLS verification remains enabled by default.
 
 The adapter should use the standard request and response headers from the reference when available, including `X-Client-Request-Id` and `x-request-id`. It must also work when a compatible proxy omits provider-specific headers.
+
+#### Rate Limiting
+
+The HTTP adapter applies a bounded client-side rate-limit policy:
+
+- Retry HTTP `429 Too Many Requests` responses up to the configured maximum; do not retry indefinitely.
+- Prefer the provider's `Retry-After` seconds or HTTP-date header when present.
+- Otherwise use capped exponential backoff with bounded jitter.
+- Optionally enforce a minimum interval between requests from the same client instance.
+- Cancel backoff immediately when the request context is cancelled or reaches its deadline.
+- Classify an exhausted throttle as a rate-limit error so the agent loop does not apply a second independent retry policy.
+- Keep each attempt observable in diagnostics and session usage accounting; a retry is a new provider attempt.
+
+Backend profiles may configure `rate_limit.max_retries`, `rate_limit.initial_backoff_ms`, `rate_limit.max_backoff_ms`, and `rate_limit.min_interval_ms`. Safe defaults are three retries, a 500 ms initial backoff, a 30 second maximum backoff, and no additional minimum interval.
 
 The first adapter should be selected based on the available project requirements. Additional providers should be addable without changing the CLI, context builder, or tool runner.
 

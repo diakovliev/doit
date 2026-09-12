@@ -4,6 +4,7 @@ package processrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/diakovliev/doit/internal/apperr"
 	"github.com/diakovliev/doit/internal/process"
+	"github.com/diakovliev/doit/internal/tools"
 )
 
 // Definition describes one executable allowlisted task.
@@ -86,6 +88,31 @@ func (runner *Runner) Run(ctx context.Context, task process.Task) (process.Resul
 	runErr := command.Run()
 	result := process.Result{Duration: time.Since(started), Stdout: stdout.String(), Stderr: stderr.String(), Truncated: len(stdout.Bytes()) >= runner.maxOutput || len(stderr.Bytes()) >= runner.maxOutput}
 	return runner.finish(processContext, runErr, result)
+}
+
+// RegisterTool exposes the allowlisted process runner as process.run.
+func RegisterTool(registry *tools.Registry, runner *Runner) error {
+	return registry.Register(processTool{runner: runner})
+}
+
+type processTool struct {
+	runner *Runner
+}
+
+func (processTool) Definition() tools.Definition {
+	return tools.Definition{Name: "process.run", Description: "Run a configured development task.", Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+}
+
+func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Result {
+	var task process.Task
+	if err := json.Unmarshal(call.Arguments, &task); err != nil {
+		return tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Message: err.Error()}}}
+	}
+	result, err := tool.runner.Run(ctx, task)
+	if err != nil {
+		return tools.Result{Status: tools.StatusFailed, Data: result, Diagnostics: []tools.Diagnostic{{Level: "error", Message: err.Error()}}}
+	}
+	return tools.Result{Status: tools.StatusSucceeded, Data: result}
 }
 
 func (runner *Runner) prepare(task process.Task) (Definition, string, time.Duration, error) {

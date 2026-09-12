@@ -4,9 +4,10 @@ package main
 import (
 	"os"
 
+	"github.com/diakovliev/doit/internal/app"
 	"github.com/diakovliev/doit/internal/cli"
 )
 
 func main() {
-	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(cli.RunWithHandler(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, app.Handler{}))
 }

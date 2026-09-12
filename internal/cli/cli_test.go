@@ -13,12 +13,12 @@ type testHandler struct {
 	agentInvocation Invocation
 }
 
-func (handler *testHandler) Run(_ context.Context, invocation Invocation, _ io.Writer) error {
+func (handler *testHandler) Run(_ context.Context, invocation Invocation, _ io.Reader, _ io.Writer) error {
 	handler.runInvocation = invocation
 	return nil
 }
 
-func (handler *testHandler) Agent(_ context.Context, invocation Invocation, _ io.Writer) error {
+func (handler *testHandler) Agent(_ context.Context, invocation Invocation, _ io.Reader, _ io.Writer) error {
 	handler.agentInvocation = invocation
 	return nil
 }
