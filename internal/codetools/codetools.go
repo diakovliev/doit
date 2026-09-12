@@ -172,7 +172,7 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			}
 			return service.Rename(ctx, request)
 		}},
-		{name: "code.format", description: "Run a configured formatter task inside the workspace. Use task format with Go file paths in arguments, for example [\"main.go\"].", parameters: `{"type":"object","properties":{"task":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"working_directory":{"type":"string"}},"required":["task"]}`, risk: tools.RiskProcess, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.format", description: "Run a configured formatter task inside the workspace. Use a task name and workspace-relative formatter arguments from the repository configuration.", parameters: `{"type":"object","properties":{"task":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"working_directory":{"type":"string"}},"required":["task"]}`, risk: tools.RiskProcess, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request FormatRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
