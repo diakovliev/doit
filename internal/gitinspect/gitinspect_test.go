@@ -5,7 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/diakovliev/doit/internal/tools"
 )
 
 func TestGitInspectionReadsFixtureRepository(t *testing.T) {
@@ -33,7 +36,11 @@ func newGitFixture(t *testing.T) string {
 	if err := os.WriteFile(filePath, []byte("hello\n"), 0600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	runGit(t, root, "add", "README.md")
+	mainPath := filepath.Join(root, "main.go")
+	if err := os.WriteFile(mainPath, []byte("package main\n"), 0600); err != nil {
+		t.Fatalf("write main fixture: %v", err)
+	}
+	runGit(t, root, "add", "README.md", "main.go")
 	runGit(t, root, "commit", "-m", "initial")
 	if err := os.WriteFile(filePath, []byte("hello\nchanged\n"), 0600); err != nil {
 		t.Fatalf("update fixture: %v", err)
@@ -81,6 +88,101 @@ func TestGitInspectionRejectsPathEscape(t *testing.T) {
 	if _, err := service.Diff(context.Background(), DiffRequest{Paths: []string{"../outside"}}); err == nil {
 		t.Fatal("expected path escape to fail")
 	}
+}
+
+func TestGitLocalMutationsAreWorkspaceScoped(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := newGitFixture(t)
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	commit := commitGitFixtureChange(t, service)
+	if commit.Hash == "" {
+		t.Fatalf("commit did not return a hash: %+v", commit)
+	}
+	restoreGitFixtureChange(t, service, root)
+	contents := readGitFile(t, root, "README.md")
+	if string(contents) != "hello\nchanged\n" {
+		t.Fatalf("unexpected restored content: %q", contents)
+	}
+}
+
+func TestGitCommitReportsCurrentPathsWhenSelectionIsClean(t *testing.T) {
+	root := newGitFixture(t)
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	_, err = service.Commit(context.Background(), CommitRequest{Message: "wrong selection", Paths: []string{"main.go"}})
+	if err == nil || !strings.Contains(err.Error(), "README.md") {
+		t.Fatalf("expected current changed path diagnostic, error=%v", err)
+	}
+}
+
+func TestGitToolsRegisterLocalMutationCapabilities(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := RegisterTools(registry, service); err != nil {
+		t.Fatalf("register Git tools: %v", err)
+	}
+	for _, name := range []string{"git.stage", "git.unstage", "git.commit", "git.restore"} {
+		tool, exists := registry.Lookup(name)
+		if !exists {
+			t.Fatalf("Git tool is not registered: %s", name)
+		}
+		if len(tool.Definition().Parameters) == 0 {
+			t.Fatalf("Git tool has no model schema: %s", name)
+		}
+	}
+}
+
+func commitGitFixtureChange(t *testing.T, service *Service) CommitResponse {
+	t.Helper()
+	commit, err := service.Commit(context.Background(), CommitRequest{Message: "update README", Paths: []string{"README.md"}})
+	if err != nil {
+		t.Fatalf("commit file: %v", err)
+	}
+	return commit
+}
+
+func restoreGitFixtureChange(t *testing.T, service *Service, root string) {
+	t.Helper()
+	filePath := filepath.Join(root, "README.md")
+	if err := os.WriteFile(filePath, []byte("second change\n"), 0600); err != nil {
+		t.Fatalf("write second change: %v", err)
+	}
+	if _, err := service.Stage(context.Background(), StageRequest{Paths: []string{"README.md"}}); err != nil {
+		t.Fatalf("stage second change: %v", err)
+	}
+	if _, err := service.Unstage(context.Background(), UnstageRequest{Paths: []string{"README.md"}}); err != nil {
+		t.Fatalf("unstage second change: %v", err)
+	}
+	if _, err := service.Stage(context.Background(), StageRequest{Paths: []string{"README.md"}}); err != nil {
+		t.Fatalf("restage second change: %v", err)
+	}
+	if _, err := service.Restore(context.Background(), RestoreRequest{Mode: "head", Paths: []string{"README.md"}}); err != nil {
+		t.Fatalf("restore HEAD: %v", err)
+	}
+}
+
+func readGitFile(t *testing.T, root, path string) []byte {
+	t.Helper()
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open fixture root: %v", err)
+	}
+	contents, err := rootHandle.ReadFile(path)
+	_ = rootHandle.Close()
+	if err != nil {
+		t.Fatalf("read fixture file: %v", err)
+	}
+	return contents
 }
 
 func runGit(t *testing.T, root string, arguments ...string) {
