@@ -554,16 +554,12 @@ Each phase should preserve the approval, observability, and deterministic valida
 
 ## 11. Open Decisions
 
-The following decisions should be made before the corresponding implementation begins:
+Phase 0 decisions are frozen in the [implementation plan](implementation-plan.md#phase-0-decision-record). The remaining decisions are intentionally deferred until the corresponding implementation or post-MVP capability requires them:
 
-- Which OpenAI Responses compatibility level is required for the first release: core only, or core plus streaming?
 - Which optional request fields should be enabled by capability profile rather than sent by default?
-- Should the initial release support only `.doit/sessions/` below the effective invocation path, or also an explicitly configured alternate local path?
 - Which secret and sensitive-data redaction rules should be enabled by default, and how should users review a redacted session before export?
-- Should project configuration use a dedicated file, existing environment conventions, or both?
-- What exact approval levels and command allowlists should be supported?
-- Which session data is safe and useful to persist locally?
-- What is the minimum supported operating-system and shell matrix?
+- Should an explicitly configured alternate local session path be supported after the MVP?
+- Which additional operating systems and shells should be supported after the Windows-first MVP?
 - Should tool extensions be an in-process Go API, an external process protocol, or remain internal until usage justifies an extension model?
 
 Until these decisions are resolved, implementations should prefer small interfaces and local behavior that can be replaced without changing the user-facing workflow.

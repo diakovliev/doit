@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Not started
+**Status:** Phase 0 complete; Phase 1 not started
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -36,15 +36,86 @@ These decisions must be resolved before the corresponding implementation task st
 
 | ID | Decision | Acceptance evidence | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| `DEC-001` | Freeze the core OpenAI Responses compatibility level: non-streaming text plus function calling; decide whether streaming is a Phase 1 requirement. | A short compatibility checklist names required and optional fields and fallback behavior. | None | `TODO` |
-| `DEC-002` | Freeze configuration format, locations, precedence, profile names, and environment variable names. | Example configuration and precedence table are committed to the docs. | None | `TODO` |
-| `DEC-003` | Freeze Go contracts for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`. | Interfaces include cancellation, errors, normalized results, and usage fields. | `DEC-001` | `TODO` |
-| `DEC-004` | Freeze the initial argument and result schemas for `fs.read`, `fs.search`, `code.apply_patch`, `git.status`, `git.diff`, and `process.run`. | Each tool has a schema test or fixture request and a documented risk class. | `DEC-003` | `TODO` |
-| `DEC-005` | Freeze automatic, confirmation-based, and rejected actions. | Approval matrix covers filesystem writes, process tasks, Git writes, remote access, and non-interactive mode. | `DEC-004` | `TODO` |
-| `DEC-006` | Freeze token counting and budget behavior, including provider usage, local estimates, unknown values, and retries. | Usage examples show per-request and cumulative session accounting. | `DEC-001`, `DEC-003` | `TODO` |
-| `DEC-007` | Freeze Git scope for subdirectories, worktrees, submodules, detached HEAD, and repository roots outside the workspace. | Git scope rules and refusal cases have fixture scenarios. | `DEC-004`, `DEC-005` | `TODO` |
-| `DEC-008` | Freeze the minimum operating-system and shell matrix, path rules, process environment, and cancellation behavior. | Supported-platform table is documented and test environments are identified. | None | `TODO` |
-| `DEC-009` | Define the deterministic fake Responses backend scenarios. | Fixtures cover text, function calls, streaming decision, usage, missing usage, rate limits, malformed responses, timeouts, and cancellation. | `DEC-001`, `DEC-006` | `TODO` |
+| `DEC-001` | Freeze the core OpenAI Responses compatibility level: non-streaming text plus function calling; decide whether streaming is a Phase 1 requirement. | A short compatibility checklist names required and optional fields and fallback behavior. | None | `DONE` |
+| `DEC-002` | Freeze configuration format, locations, precedence, profile names, and environment variable names. | Example configuration and precedence table are committed to the docs. | None | `DONE` |
+| `DEC-003` | Freeze Go contracts for `ModelClient`, `Tool`, `ToolResult`, `ApprovalPolicy`, `SessionStore`, and `TokenCounter`. | Interfaces include cancellation, errors, normalized results, and usage fields. | `DEC-001` | `DONE` |
+| `DEC-004` | Freeze the initial argument and result schemas for `fs.read`, `fs.search`, `code.apply_patch`, `git.status`, `git.diff`, and `process.run`. | Each tool has a schema test or fixture request and a documented risk class. | `DEC-003` | `DONE` |
+| `DEC-005` | Freeze automatic, confirmation-based, and rejected actions. | Approval matrix covers filesystem writes, process tasks, Git writes, remote access, and non-interactive mode. | `DEC-004` | `DONE` |
+| `DEC-006` | Freeze token counting and budget behavior, including provider usage, local estimates, unknown values, and retries. | Usage examples show per-request and cumulative session accounting. | `DEC-001`, `DEC-003` | `DONE` |
+| `DEC-007` | Freeze Git scope for subdirectories, worktrees, submodules, detached HEAD, and repository roots outside the workspace. | Git scope rules and refusal cases have fixture scenarios. | `DEC-004`, `DEC-005` | `DONE` |
+| `DEC-008` | Freeze the minimum operating-system and shell matrix, path rules, process environment, and cancellation behavior. | Supported-platform table is documented and test environments are identified. | None | `DONE` |
+| `DEC-009` | Define the deterministic fake Responses backend scenarios. | Fixtures cover text, function calls, streaming decision, usage, missing usage, rate limits, malformed responses, timeouts, and cancellation. | `DEC-001`, `DEC-006` | `DONE` |
+
+### Phase 0 Decision Record
+
+These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require a new plan entry and an explicit design update.
+
+#### `DEC-001` API Compatibility
+
+- Core compatibility requires non-streaming `POST {api_root}/responses` with text input, text output, client-defined function tools, `function_call` output items, and `function_call_output` follow-up items.
+- The client manages conversation state locally. Provider-managed state, hosted tools, multimodal input, and structured output are optional capabilities.
+- Streaming is not required for the Phase 1 MVP. `MODEL-002` may add SSE support after the non-streaming path is stable; non-streaming fallback remains mandatory.
+
+#### `DEC-002` Configuration
+
+- Configuration uses JSON to keep the initial implementation dependency-light and directly supported by the Go standard library.
+- Project configuration is a non-secret `.doit/config.json` below the effective invocation path. User configuration lives in the operating-system user configuration directory under `doit/config.json`.
+- Precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, then command-line flags.
+- `DOIT_CONFIG_FILE` may select an explicit configuration file. `DOIT_PROFILE`, `DOIT_MODEL`, and `DOIT_API_ROOT` are supported direct overrides.
+- Credentials are referenced by environment-variable name or operating-system credential reference; raw tokens are not stored in configuration files.
+
+#### `DEC-003` Go Contracts
+
+- `ModelClient` accepts `context.Context` and normalized model requests, returning normalized responses or categorized errors.
+- `Tool` exposes a stable name, JSON schema, risk class, limits, and a cancellation-aware execution method.
+- `ToolResult` distinguishes success, failure, denial, and cancellation and carries bounded structured data and diagnostics.
+- `ApprovalPolicy` evaluates a typed action and returns allow, confirm, deny, or cancel without executing the action.
+- `SessionStore` starts or resumes a session, appends ordered events, writes completion results, and recovers interrupted sessions.
+- `TokenCounter` produces labeled exact, estimated, mixed, or unknown usage values and never treats unknown as zero.
+- Contracts live in focused subpackages under `internal/`; the root `main` package remains integration-only.
+
+#### `DEC-004` Tool Schemas
+
+- `fs.read`: `{path, start_line?, end_line?, max_bytes?}`.
+- `fs.search`: `{query, path?, glob?, max_results?, include_ignored?}`.
+- `code.apply_patch`: `{patch, expected_hashes?, dry_run?}`.
+- `git.status`: `{path?, include_ignored?}`.
+- `git.diff`: `{source, revision?, paths?, max_bytes?}` where source is `worktree`, `index`, or `range`.
+- `process.run`: `{task, args?, working_directory?, timeout?}` where task is a configured name, not an executable string.
+- Every tool returns the normalized result shape and declares its risk class, path scope, timeout, output limit, and cancellation behavior.
+
+#### `DEC-005` Approval Policy
+
+- Read-only filesystem and Git inspection is automatic within the effective scope.
+- Process execution, code writes, renames, deletes, and all Git index or history changes require confirmation in the MVP.
+- Arbitrary shell pipelines, path escapes, writes outside the workspace, remote access, pushes, force operations, and history rewrites are rejected.
+- Non-interactive invocations deny confirmation-required actions unless an explicit configured policy allows them.
+
+#### `DEC-006` Token Accounting
+
+- Provider usage is authoritative when present. Otherwise the first implementation uses a deterministic fallback estimate of at least one token for non-empty input and approximately one token per four UTF-8 bytes, always labeled as an estimate.
+- Input usage includes instructions, input items, tool definitions, and previous tool results. Output usage includes provider-reported reasoning tokens when included by the backend.
+- Initial defaults are `max_input_tokens: 16000`, `max_output_tokens: 4000`, and `max_session_tokens: 64000`; backend or user limits may lower them.
+- Transport retries are limited to two retries for explicitly retryable failures. Every attempt has its own usage record; tool execution is never replayed automatically.
+
+#### `DEC-007` Git Scope
+
+- The effective invocation path is the write boundary. Git may report a containing repository root for inspection, but files outside the effective path are not exposed through path-scoped tools by default.
+- Worktrees are treated as independent roots. Submodules are not traversed unless explicitly selected.
+- Detached HEAD is readable but does not enable branch or history changes. A repository root outside the effective path permits read-only, path-scoped inspection only.
+- The MVP performs no remote Git operations and does not commit, restore, branch, merge, reset, or rewrite history.
+
+#### `DEC-008` Platform Contract
+
+- Phase 1 is validated on Windows 10/11 with PowerShell 5.1 or later and `pwsh` 7 or later. The Go APIs avoid shell-specific quoting so later POSIX support remains possible.
+- Paths use Go's platform-aware path handling. Process tasks use configured argument arrays rather than shell command strings.
+- Process cancellation is context-driven with bounded output, bounded duration, and an allowlisted environment.
+
+#### `DEC-009` Fake Backend Scenarios
+
+- The test backend is an in-process `httptest.Server` with deterministic responses for text, function calls, provider usage, missing usage, malformed JSON, authentication failure, rate limiting, server failure, timeout, and cancellation.
+- Streaming is represented as an unsupported capability in the MVP fixture set; SSE scenarios begin with `MODEL-002` if streaming is enabled later.
+- The default test suite never requires real credentials or network access.
 
 ## Phase 1: Foundation
 
@@ -108,3 +179,4 @@ Deferred work must not change the approval, observability, token accounting, ses
 | Date | Task ID | Change | Evidence |
 | --- | --- | --- | --- |
 | 2026-09-12 | `PLAN-001` | Created the initial trackable implementation plan from the project design. | This document |
+| 2026-09-12 | `DEC-001`-`DEC-009` | Frozen the Safe Local MVP compatibility, configuration, contracts, tool schemas, approvals, token accounting, Git scope, platform, and fake-backend decisions. | [Phase 0 Decision Record](#phase-0-decision-record); [design open decisions](design.md#11-open-decisions) |
