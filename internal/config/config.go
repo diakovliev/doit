@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 type BackendProfile struct {
 	APIRoot   string            `json:"api_root"`
 	Model     string            `json:"model"`
+	Streaming bool              `json:"streaming,omitempty"`
 	APIKeyEnv string            `json:"api_key_env,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	RateLimit RateLimitConfig   `json:"rate_limit,omitempty"`
@@ -49,16 +51,30 @@ type TaskConfig struct {
 	Kind        string   `json:"kind,omitempty"`
 }
 
+// MCPServerConfig describes one explicitly configured MCP tool server.
+type MCPServerConfig struct {
+	Transport        string            `json:"transport"`
+	Command          string            `json:"command,omitempty"`
+	Arguments        []string          `json:"arguments,omitempty"`
+	Environment      []string          `json:"environment,omitempty"`
+	WorkingDirectory string            `json:"working_directory,omitempty"`
+	URL              string            `json:"url,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	AllowNetwork     bool              `json:"allow_network,omitempty"`
+	TimeoutMs        int               `json:"timeout_ms,omitempty"`
+}
+
 // Config is the effective configuration after all sources are merged.
 type Config struct {
-	Workspace   string                    `json:"workspace"`
-	Profile     string                    `json:"profile"`
-	ToolProfile string                    `json:"tool_profile"`
-	Format      string                    `json:"format"`
-	Ephemeral   bool                      `json:"ephemeral"`
-	Profiles    map[string]BackendProfile `json:"profiles"`
-	Tasks       map[string]TaskConfig     `json:"tasks"`
-	Token       TokenBudget               `json:"token"`
+	Workspace   string                     `json:"workspace"`
+	Profile     string                     `json:"profile"`
+	ToolProfile string                     `json:"tool_profile"`
+	Format      string                     `json:"format"`
+	Ephemeral   bool                       `json:"ephemeral"`
+	Profiles    map[string]BackendProfile  `json:"profiles"`
+	Tasks       map[string]TaskConfig      `json:"tasks"`
+	MCPServers  map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	Token       TokenBudget                `json:"token"`
 }
 
 // Overrides are values supplied by environment variables or CLI flags.
@@ -81,13 +97,14 @@ type LoadOptions struct {
 }
 
 type fileConfig struct {
-	DefaultProfile string                    `json:"default_profile"`
-	ToolProfile    string                    `json:"tool_profile"`
-	Profiles       map[string]BackendProfile `json:"profiles"`
-	Format         string                    `json:"format"`
-	Ephemeral      *bool                     `json:"ephemeral"`
-	Tasks          map[string]TaskConfig     `json:"tasks"`
-	Token          TokenBudget               `json:"token"`
+	DefaultProfile string                     `json:"default_profile"`
+	ToolProfile    string                     `json:"tool_profile"`
+	Profiles       map[string]BackendProfile  `json:"profiles"`
+	Format         string                     `json:"format"`
+	Ephemeral      *bool                      `json:"ephemeral"`
+	Tasks          map[string]TaskConfig      `json:"tasks"`
+	MCPServers     map[string]MCPServerConfig `json:"mcp_servers"`
+	Token          TokenBudget                `json:"token"`
 }
 
 // DefaultTokenBudget returns the frozen Phase 0 defaults.
@@ -123,6 +140,9 @@ func Load(options LoadOptions) (Config, error) {
 	}
 	applyOverrides(&result, options.Overrides)
 	applyEnvironmentProfileValues(&result, environment, options.Overrides)
+	if err := result.ValidateMCPServers(); err != nil {
+		return Config{}, err
+	}
 	return result, nil
 }
 
@@ -149,6 +169,7 @@ func defaultConfig(workspace string) Config {
 		Format:      "human",
 		Profiles:    make(map[string]BackendProfile),
 		Tasks:       make(map[string]TaskConfig),
+		MCPServers:  make(map[string]MCPServerConfig),
 		Token:       DefaultTokenBudget(),
 	}
 }
@@ -237,6 +258,14 @@ func readFileConfig(filePath string) (fileConfig, error) {
 }
 
 func applyFileConfig(result *Config, loaded fileConfig) {
+	applyFileValues(result, loaded)
+	applyFileProfiles(result, loaded.Profiles)
+	applyFileTasks(result, loaded.Tasks)
+	applyFileMCPServers(result, loaded.MCPServers)
+	applyFileToken(result, loaded.Token)
+}
+
+func applyFileValues(result *Config, loaded fileConfig) {
 	if loaded.DefaultProfile != "" {
 		result.Profile = loaded.DefaultProfile
 	}
@@ -250,21 +279,125 @@ func applyFileConfig(result *Config, loaded fileConfig) {
 	for name, task := range loaded.Tasks {
 		result.Tasks[name] = task
 	}
+	for name, server := range loaded.MCPServers {
+		result.MCPServers[name] = server
+	}
 	if loaded.Format != "" {
 		result.Format = loaded.Format
 	}
 	if loaded.Ephemeral != nil {
 		result.Ephemeral = *loaded.Ephemeral
 	}
-	if loaded.Token.MaxInputTokens > 0 {
-		result.Token.MaxInputTokens = loaded.Token.MaxInputTokens
+}
+
+func applyFileProfiles(result *Config, profiles map[string]BackendProfile) {
+	for name, profile := range profiles {
+		profile.APIRoot = strings.TrimRight(profile.APIRoot, "/")
+		result.Profiles[name] = profile
 	}
-	if loaded.Token.MaxOutputTokens > 0 {
-		result.Token.MaxOutputTokens = loaded.Token.MaxOutputTokens
+}
+
+func applyFileTasks(result *Config, tasks map[string]TaskConfig) {
+	for name, task := range tasks {
+		result.Tasks[name] = task
 	}
-	if loaded.Token.MaxSessionTokens > 0 {
-		result.Token.MaxSessionTokens = loaded.Token.MaxSessionTokens
+}
+
+func applyFileMCPServers(result *Config, servers map[string]MCPServerConfig) {
+	for name, server := range servers {
+		result.MCPServers[name] = server
 	}
+}
+
+func applyFileToken(result *Config, token TokenBudget) {
+	if token.MaxInputTokens > 0 {
+		result.Token.MaxInputTokens = token.MaxInputTokens
+	}
+	if token.MaxOutputTokens > 0 {
+		result.Token.MaxOutputTokens = token.MaxOutputTokens
+	}
+	if token.MaxSessionTokens > 0 {
+		result.Token.MaxSessionTokens = token.MaxSessionTokens
+	}
+}
+
+// ValidateMCPServers validates every explicitly configured MCP transport.
+func (configuration Config) ValidateMCPServers() error {
+	for name, server := range configuration.MCPServers {
+		if err := server.Validate(); err != nil {
+			return apperr.Wrap(apperr.KindConfig, "config.mcp_server."+name, err)
+		}
+	}
+	return nil
+}
+
+// Validate checks the transport and bounded request settings for an MCP server.
+func (server MCPServerConfig) Validate() error {
+	if err := validateMCPTransport(server); err != nil {
+		return err
+	}
+	return validateMCPBounds(server)
+}
+
+func validateMCPTransport(server MCPServerConfig) error {
+	switch normalizedMCPTransport(server.Transport) {
+	case "stdio":
+		if server.Command == "" {
+			return errors.New("stdio MCP server requires command")
+		}
+	case "streamable-http":
+		return validateMCPHTTPTransport(server)
+	default:
+		return fmt.Errorf("unsupported MCP transport %q", server.Transport)
+	}
+	return nil
+}
+
+func normalizedMCPTransport(transport string) string {
+	if transport == "" {
+		return "stdio"
+	}
+	return transport
+}
+
+func validateMCPHTTPTransport(server MCPServerConfig) error {
+	if !server.AllowNetwork {
+		return errors.New("streamable-http MCP server requires allow_network=true")
+	}
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil || parsedURL.Host == "" || !isHTTPURL(parsedURL.Scheme) {
+		return errors.New("streamable-http MCP server url must be an HTTP or HTTPS URL")
+	}
+	return nil
+}
+
+func isHTTPURL(scheme string) bool {
+	return scheme == "http" || scheme == "https"
+}
+
+func validateMCPBounds(server MCPServerConfig) error {
+	if server.TimeoutMs < 0 || server.TimeoutMs > 10*60*1000 {
+		return errors.New("MCP timeout_ms must be between 0 and 600000")
+	}
+	if len(server.Headers) > 32 {
+		return errors.New("MCP server headers are limited to 32 entries")
+	}
+	for name, value := range server.Headers {
+		if err := validateMCPHeader(name, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMCPHeader(name, value string) error {
+	if name == "" || len(name) > 256 || http.CanonicalHeaderKey(name) == "" || strings.ContainsAny(name, "\r\n:") {
+		return errors.New("MCP server headers contain an invalid or oversized name")
+	}
+	if len(value) > 4096 || strings.ContainsAny(value, "\r\n") {
+		return errors.New("MCP server headers contain an invalid or oversized value")
+	}
+	return nil
 }
 
 func applyEnvironment(result *Config, environment map[string]string) error {

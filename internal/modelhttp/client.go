@@ -2,6 +2,7 @@
 package modelhttp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -108,6 +109,210 @@ func (client *Client) Create(ctx context.Context, request model.Request) (model.
 	return client.execute(ctx, body, wireNames, reservedTokens)
 }
 
+// CreateStream implements the optional Responses SSE transport.
+func (client *Client) CreateStream(ctx context.Context, request model.Request, onEvent func(model.StreamEvent) error) (model.Response, error) {
+	if err := request.Validate(); err != nil {
+		return model.Response{}, err
+	}
+	wireNames := wireToolNames(request.Tools)
+	request = wireRequest(request, wireNames)
+	request.Stream = true
+	body, err := json.Marshal(request)
+	if err != nil {
+		return model.Response{}, apperr.Wrap(apperr.KindBackend, "modelhttp.encode", err)
+	}
+	reservedTokens := int64(request.MaxOutputTokens)
+	if estimatedInput, countErr := client.tokenCounter.Count(ctx, body); countErr == nil {
+		reservedTokens += estimatedInput
+	}
+	return client.executeStream(ctx, body, wireNames, reservedTokens, onEvent)
+}
+
+func (client *Client) executeStream(ctx context.Context, body []byte, wireNames map[string]string, reservedTokens int64, onEvent func(model.StreamEvent) error) (model.Response, error) {
+	response, err := client.executeStreamOnce(ctx, body, reservedTokens, onEvent)
+	if err != nil {
+		return model.Response{}, err
+	}
+	return client.normalizeStreamResponse(ctx, body, response.body, response.streamedText, response.headers, response.clientRequestID, reverseNames(wireNames))
+}
+
+func (client *Client) executeStreamOnce(ctx context.Context, body []byte, reservedTokens int64, onEvent func(model.StreamEvent) error) (httpResult, error) {
+	if err := client.waitForRateSlot(ctx, reservedTokens); err != nil {
+		return httpResult{}, err
+	}
+	httpResponse, clientRequestID, err := client.doStreamRequest(ctx, body)
+	if err != nil {
+		return httpResult{}, err
+	}
+	defer func() { _ = httpResponse.Body.Close() }()
+	return client.readStreamResponse(ctx, httpResponse, clientRequestID, onEvent)
+}
+
+func (client *Client) doStreamRequest(ctx context.Context, body []byte) (*http.Response, string, error) {
+	httpRequest, clientRequestID, err := client.newStreamRequest(ctx, body)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.KindBackend, "modelhttp.request", err)
+	}
+	httpResponse, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, "", ctx.Err()
+		}
+		return nil, "", apperr.Wrap(apperr.KindBackend, "modelhttp.request", err)
+	}
+	return httpResponse, clientRequestID, nil
+}
+
+func (client *Client) readStreamResponse(ctx context.Context, httpResponse *http.Response, clientRequestID string, onEvent func(model.StreamEvent) error) (httpResult, error) {
+	if httpResponse.StatusCode < http.StatusOK || httpResponse.StatusCode >= http.StatusMultipleChoices {
+		return httpResult{}, readStreamBackendError(httpResponse)
+	}
+	stream, err := client.readStream(httpResponse.Body, onEvent)
+	if err != nil {
+		if ctx.Err() != nil {
+			return httpResult{}, ctx.Err()
+		}
+		return httpResult{}, err
+	}
+	if len(stream.body) == 0 {
+		stream.body = []byte(`{"id":"","status":"completed","output":[]}`)
+	}
+	return httpResult{statusCode: httpResponse.StatusCode, headers: httpResponse.Header, body: stream.body, streamedText: stream.text, clientRequestID: clientRequestID}, nil
+}
+
+func (client *Client) newStreamRequest(ctx context.Context, body []byte) (*http.Request, string, error) {
+	requestURL := strings.TrimRight(client.profile.APIRoot, "/") + "/responses"
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Accept", "text/event-stream")
+	clientRequestID := requestID()
+	httpRequest.Header.Set("X-Client-Request-Id", clientRequestID)
+	if client.apiKey != "" {
+		httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
+	}
+	for name, value := range client.profile.Headers {
+		httpRequest.Header.Set(name, value)
+	}
+	return httpRequest, clientRequestID, nil
+}
+
+func readStreamBackendError(response *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes*16))
+	if err != nil {
+		return apperr.Wrap(apperr.KindBackend, "modelhttp.read", err)
+	}
+	return backendError(response.StatusCode, body)
+}
+
+type streamReadResult struct {
+	body []byte
+	text string
+}
+
+func (client *Client) readStream(reader io.Reader, onEvent func(model.StreamEvent) error) (streamReadResult, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), maxErrorBodyBytes*64)
+	dataLines := make([]string, 0, 1)
+	result := streamReadResult{}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
+		}
+		if line == "" {
+			if err := client.processStreamData(dataLines, onEvent, &result); err != nil {
+				return streamReadResult{}, err
+			}
+			dataLines = dataLines[:0]
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return streamReadResult{}, apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
+	}
+	if err := client.processStreamData(dataLines, onEvent, &result); err != nil {
+		return streamReadResult{}, err
+	}
+	return result, nil
+}
+
+func (client *Client) processStreamData(dataLines []string, onEvent func(model.StreamEvent) error, result *streamReadResult) error {
+	if len(dataLines) == 0 {
+		return nil
+	}
+	data := strings.Join(dataLines, "\n")
+	if data == "[DONE]" {
+		return nil
+	}
+	var event streamEvent
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
+	}
+	if event.Delta != "" {
+		result.text += event.Delta
+		if onEvent != nil {
+			if err := onEvent(model.StreamEvent{Type: event.Type, Text: event.Delta}); err != nil {
+				return err
+			}
+		}
+	}
+	if isTerminalStreamEvent(event.Type) && len(event.Response) > 0 {
+		result.body = append([]byte(nil), event.Response...)
+	}
+	return nil
+}
+
+type streamEvent struct {
+	Type     string          `json:"type"`
+	Delta    string          `json:"delta"`
+	Response json.RawMessage `json:"response"`
+}
+
+func isTerminalStreamEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete", "response.cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func (client *Client) normalizeStreamResponse(ctx context.Context, requestBody, responseBody []byte, streamedText string, headers http.Header, clientRequestID string, localNames map[string]string) (model.Response, error) {
+	responseBody, err := appendStreamText(responseBody, streamedText)
+	if err != nil {
+		return model.Response{}, apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
+	}
+	return client.normalizeResponse(ctx, requestBody, responseBody, headers, clientRequestID, localNames)
+}
+
+func appendStreamText(responseBody []byte, streamedText string) ([]byte, error) {
+	if streamedText == "" {
+		return responseBody, nil
+	}
+	var wire wireResponse
+	if err := json.Unmarshal(responseBody, &wire); err != nil {
+		return nil, err
+	}
+	for _, rawItem := range wire.Output {
+		var item wireOutputItem
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			return nil, err
+		}
+		if item.Type == "message" && outputText(item.Content) != "" {
+			return responseBody, nil
+		}
+	}
+	message, err := json.Marshal(wireOutputItem{Type: "message", Content: []wireContentPart{{Type: "output_text", Text: streamedText}}})
+	if err != nil {
+		return nil, err
+	}
+	wire.Output = append(wire.Output, message)
+	return json.Marshal(wire)
+}
+
 func (client *Client) execute(ctx context.Context, body []byte, wireNames map[string]string, reservedTokens int64) (model.Response, error) {
 	for attempt := 0; ; attempt++ {
 		response, err := client.executeOnce(ctx, body, reservedTokens)
@@ -137,6 +342,7 @@ type httpResult struct {
 	statusCode      int
 	headers         http.Header
 	body            []byte
+	streamedText    string
 	clientRequestID string
 }
 
@@ -459,6 +665,7 @@ func requestID() string {
 }
 
 var _ model.ModelClient = (*Client)(nil)
+var _ model.StreamingModelClient = (*Client)(nil)
 
 func wireRequest(request model.Request, names map[string]string) model.Request {
 	request.Tools = append([]model.ToolDefinition(nil), request.Tools...)

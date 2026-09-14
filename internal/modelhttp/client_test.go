@@ -30,6 +30,84 @@ func TestClientNormalizesTextFunctionCallsAndProviderUsage(t *testing.T) {
 	requireProviderUsage(t, response.Usage)
 }
 
+func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Accept") != "text/event-stream" {
+			http.Error(writer, "streaming was not requested", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"stream-1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+	client, err := New(config.BackendProfile{APIRoot: server.URL + "/v1", Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	var streamed strings.Builder
+	response, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, func(event model.StreamEvent) error {
+		streamed.WriteString(event.Text)
+		return nil
+	})
+	if err != nil || response.ID != "stream-1" || response.Text != "Hello" || streamed.String() != "Hello" {
+		t.Fatalf("unexpected streamed response: %+v streamed=%q error=%v", response, streamed.String(), err)
+	}
+}
+
+func TestClientPreservesStreamedTextWhenTerminalOutputIsOmitted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"stream-2\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	response, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, nil)
+	if err != nil || response.ID != "stream-2" || response.Text != "partial" {
+		t.Fatalf("streamed text was lost: response=%+v error=%v", response, err)
+	}
+}
+
+func TestClientReturnsContextCancellationDuringStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := writer.(http.Flusher)
+		if !ok {
+			t.Error("streaming test server does not support flushing")
+			return
+		}
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+		flusher.Flush()
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = client.CreateStream(ctx, model.Request{Model: "test-model"}, func(model.StreamEvent) error {
+		cancel()
+		return nil
+	})
+	if !strings.Contains(errString(err), "context canceled") {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func requireNormalizedResponse(t *testing.T, response model.Response) {
 	t.Helper()
 	if response.ID != "resp-1" || response.Text != "hello" || len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "fs.read" || response.RequestID == "" || response.ProviderRequestID != "provider-1" {

@@ -25,7 +25,7 @@ The design follows the goals in [purpose.md](purpose.md):
 - Keep model providers behind an adapter so the rest of the application does not depend on one vendor or protocol.
 - Make actions observable, interruptible, and recoverable when a model, tool, or process fails.
 - Treat workspace contents, command execution, credentials, and model output as security-sensitive inputs.
-- Keep the first implementation small enough to test thoroughly and extend without a plugin system prematurely.
+- Keep the first implementation small enough to test thoroughly and extend through a deliberate protocol boundary; do not commit to a general plugin system before its trust and lifecycle model are understood.
 
 ## 3. Non-Goals for the Initial Release
 
@@ -36,6 +36,8 @@ The first release does not need to:
 - Replace a full IDE, CI system, issue tracker, or code-hosting platform.
 - Execute arbitrary remote actions or manage production infrastructure.
 - Preserve unlimited conversation history or send an entire repository to a model.
+- Synchronize sessions, artifacts, or telemetry to cloud services; project state remains local by design.
+- Adopt a general plugin system before the MCP tool boundary and its policy model have been evaluated.
 
 These boundaries keep the initial product focused on local, developer-controlled workflows.
 
@@ -201,7 +203,7 @@ The backend does not need to implement every field or endpoint in the OpenAI ref
 Capabilities are declared or discovered per backend and are reported to the user when a connection is tested:
 
 - **Core:** Non-streaming text responses and client-defined function calling. This is the minimum required for agent mode.
-- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. If streaming is unavailable, the adapter falls back to a non-streaming request.
+- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. Streaming is planned for Phase 5; if it is unavailable, the adapter continues to use the non-streaming request path.
 - **Structured output:** JSON Schema response formats for machine-readable task results.
 - **Multimodal input:** Image or file input items accepted by the backend.
 - **Managed state:** `previous_response_id` or `conversation` support. This is optional because `doit` manages conversation state locally by default.
@@ -309,6 +311,12 @@ A normalized result has this conceptual shape:
 ```
 
 The actual implementation types may differ, but the status distinction and bounded diagnostics are part of the tool contract. A denied action is not an empty successful result.
+
+#### MCP Tool Interoperability
+
+MCP is the planned interoperability boundary for supporting external tools. `doit` should act as an MCP client for explicitly configured tool servers and translate MCP tool definitions and results into the normalized tool contract above. MCP support must preserve the same workspace boundary, effect metadata, timeouts, output limits, redaction, change-set evidence, and trusted workspace-automation policy as built-in tools.
+
+An MCP server is not implicitly trusted because it speaks the protocol. Server configuration, transport type, network access, exposed tools, and declared side effects remain explicit policy inputs. Local MCP servers may be enabled without granting arbitrary remote access; remote MCP transports require a separate capability decision. A general in-process plugin system is not part of this design and remains undecided.
 
 #### Required MVP Toolset
 
@@ -509,6 +517,8 @@ A backend profile should contain:
 - Transport settings such as request timeout, proxy choice, and whether an explicitly configured local HTTP endpoint is allowed.
 
 The configuration format should support multiple named backend profiles and a selected default, so a user can switch models without changing the task or repository configuration. Secrets should be supplied through environment variables or an operating-system credential store rather than committed configuration files.
+
+Project configuration may define MCP tool servers under `mcp_servers`. Stdio servers specify a command and argument array; streamable HTTP servers specify a URL and must opt into network access explicitly. MCP tools are discovered at runtime, mapped into the normalized registry, and remain subject to capability profiles, workspace policy, bounded execution, redaction, and change-set evidence.
 
 ## 7. Security and Reliability
 

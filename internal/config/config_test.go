@@ -13,7 +13,8 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
 	writeConfigFile(t, projectFile, `{
   "default_profile": "project",
 	"tool_profile": "edit",
-  "format": "human",
+	  "format": "human",
+	  "mcp_servers": {"fixture": {"transport": "stdio", "command": "fixture-mcp"}},
   "profiles": {"project": {"api_root": "https://project.example/v1", "model": "project-model"}},
 	"tasks": {"probe": {"executable": "git", "arguments": ["--version"]}},
   "token": {"max_input_tokens": 1000}
@@ -51,6 +52,9 @@ func assertPrecedenceConfig(t *testing.T, configuration Config) {
 	}
 	if configuration.ToolProfile != "edit" {
 		t.Fatalf("expected configured tool profile, got %q", configuration.ToolProfile)
+	}
+	if configuration.MCPServers["fixture"].Command != "fixture-mcp" {
+		t.Fatalf("expected configured MCP server: %+v", configuration.MCPServers)
 	}
 	if configuration.Token.MaxInputTokens != 1000 || configuration.Token.MaxOutputTokens != 2000 {
 		t.Fatalf("unexpected token budgets: %+v", configuration.Token)
@@ -104,6 +108,33 @@ func TestBackendProfileValidation(t *testing.T) {
 	profile.Model = ""
 	if err := profile.Validate(); err == nil {
 		t.Fatal("expected missing model to fail")
+	}
+}
+
+func TestMCPServerValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		server MCPServerConfig
+		valid  bool
+	}{
+		{name: "stdio", server: MCPServerConfig{Transport: "stdio", Command: "fixture"}, valid: true},
+		{name: "http", server: MCPServerConfig{Transport: "streamable-http", URL: "https://example.test/mcp", AllowNetwork: true}, valid: true},
+		{name: "missing command", server: MCPServerConfig{Transport: "stdio"}},
+		{name: "network opt in", server: MCPServerConfig{Transport: "streamable-http", URL: "https://example.test/mcp"}},
+		{name: "invalid URL", server: MCPServerConfig{Transport: "streamable-http", URL: "file:///tmp/mcp", AllowNetwork: true}},
+		{name: "timeout bound", server: MCPServerConfig{Transport: "stdio", Command: "fixture", TimeoutMs: 600001}},
+		{name: "header bound", server: MCPServerConfig{Transport: "stdio", Command: "fixture", Headers: map[string]string{"X-Test": "line\nbreak"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.server.Validate()
+			if test.valid && err != nil {
+				t.Fatalf("expected valid MCP server, got %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("expected invalid MCP server")
+			}
+		})
 	}
 }
 

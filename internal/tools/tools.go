@@ -47,6 +47,7 @@ type Definition struct {
 	Description    string          `json:"description,omitempty"`
 	Parameters     json.RawMessage `json:"parameters,omitempty"`
 	Risk           Risk            `json:"risk"`
+	UsesNetwork    bool            `json:"uses_network,omitempty"`
 	Timeout        time.Duration   `json:"timeout"`
 	MaxOutputBytes int             `json:"max_output_bytes"`
 	MaxArguments   int             `json:"max_arguments"`

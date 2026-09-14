@@ -190,6 +190,24 @@ An authenticated Microsoft Foundry profile can look like this:
 }
 ```
 
+Set `streaming: true` on a backend profile to opt into Responses SSE events when the backend supports them. The adapter falls back to the normalized non-streaming request path when streaming is unavailable.
+
+Configured MCP tools can be added under `mcp_servers`:
+
+```json
+{
+  "mcp_servers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "<mcp-server>",
+      "arguments": ["<server-argument>"]
+    }
+  }
+}
+```
+
+MCP servers are explicit capabilities. Streamable HTTP requires `allow_network: true`; discovered tools are filtered by `tool_profile` and use the same timeout, output, redaction, and workspace policy as built-in tools.
+
 Set the credential only in the current shell. Never commit it, put it in a README, or pass it as a CLI argument:
 
 ```powershell
@@ -346,6 +364,8 @@ Code and validation:
 ```
 
 The model-facing schema advertises the tasks available in the current workspace. Providers that reject dotted tool names see this tool as `process_run`, which is mapped back to `process.run` before execution.
+
+MCP is the planned extension boundary for external tools. Configured MCP servers will be mapped into the same normalized tool, policy, workspace, timeout, output, redaction, and change-set contracts as built-in tools. Cloud session synchronization and hosted telemetry are intentionally not part of `doit`; general plugins remain undecided.
 
 The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
