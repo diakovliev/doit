@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -72,6 +73,7 @@ type Runner struct {
 	Approve   ApprovalFunc
 	MaxRounds int
 	Progress  ProgressFunc
+	Streaming bool
 }
 
 // Run executes a model/tool loop and persists its lifecycle events.
@@ -178,7 +180,7 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 
 func (runner *Runner) createResponse(ctx context.Context, request model.Request) (model.Response, error) {
 	for attempt := range 3 {
-		response, err := runner.Client.Create(ctx, request)
+		response, err := runner.createModelResponse(ctx, request)
 		if err == nil {
 			return response, nil
 		}
@@ -187,6 +189,28 @@ func (runner *Runner) createResponse(ctx context.Context, request model.Request)
 		}
 	}
 	return model.Response{}, apperr.New(apperr.KindBackend, "agent.response", "model request retries exhausted")
+}
+
+func (runner *Runner) createModelResponse(ctx context.Context, request model.Request) (model.Response, error) {
+	if runner.Streaming {
+		if client, ok := runner.Client.(model.StreamingModelClient); ok {
+			response, err := client.CreateStream(ctx, request, func(event model.StreamEvent) error {
+				if event.Text != "" {
+					runner.emit(ProgressEvent{Phase: "model", Message: "streaming model output"})
+				}
+				return nil
+			})
+			if err == nil || !streamingFallbackAllowed(ctx, err) {
+				return response, err
+			}
+			return runner.Client.Create(ctx, request)
+		}
+	}
+	return runner.Client.Create(ctx, request)
+}
+
+func streamingFallbackAllowed(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func (runner *Runner) validate() error {
@@ -392,7 +416,7 @@ func approvalIdentity(workspaceAutomation, nonInteractive bool) string {
 }
 
 func (runner *Runner) toolDecision(ctx context.Context, definition tools.Definition, call model.ToolCall, nonInteractive bool, workspaceAutomation bool) (policy.Decision, error) {
-	action := policy.Action{Name: definition.Name, Risk: definition.Risk, NonInteractive: nonInteractive, WorkspaceAutomation: workspaceAutomation}
+	action := policy.Action{Name: definition.Name, Risk: definition.Risk, UsesNetwork: definition.UsesNetwork, NonInteractive: nonInteractive, WorkspaceAutomation: workspaceAutomation}
 	decision := runner.Policy.Decide(ctx, action)
 	if decision != policy.DecisionConfirm || runner.Approve == nil {
 		if decision == policy.DecisionConfirm {

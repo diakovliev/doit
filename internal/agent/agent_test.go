@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -21,6 +22,65 @@ type sequenceClient struct {
 	responses []model.Response
 	index     int
 	requests  []model.Request
+}
+
+type streamingTestClient struct {
+	streamed    bool
+	streamError bool
+	fallback    bool
+}
+
+func (client *streamingTestClient) Create(context.Context, model.Request) (model.Response, error) {
+	client.fallback = true
+	return model.Response{Status: "completed", Text: "fallback"}, nil
+}
+
+func (client *streamingTestClient) CreateStream(_ context.Context, _ model.Request, onEvent func(model.StreamEvent) error) (model.Response, error) {
+	client.streamed = true
+	if client.streamError {
+		return model.Response{}, errors.New("streaming transport unavailable")
+	}
+	if err := onEvent(model.StreamEvent{Type: "response.output_text.delta", Text: "streamed"}); err != nil {
+		return model.Response{}, err
+	}
+	return model.Response{Status: "completed", Text: "streamed"}, nil
+}
+
+func TestRunnerUsesConfiguredStreamingClient(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	client := &streamingTestClient{}
+	runner.Client = client
+	runner.Streaming = true
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "stream", Workspace: root, Model: "test-model"})
+	if err != nil || outcome.Text != "streamed" || !client.streamed {
+		t.Fatalf("streaming client was not used: outcome=%+v streamed=%t error=%v", outcome, client.streamed, err)
+	}
+}
+
+func TestRunnerFallsBackWhenStreamingIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	runner.Streaming = true
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "fallback", Workspace: root, Model: "test-model"})
+	if err != nil || outcome.Text != "finished" {
+		t.Fatalf("streaming fallback failed: outcome=%+v error=%v", outcome, err)
+	}
+}
+
+func TestRunnerFallsBackWhenStreamingFails(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	client := &streamingTestClient{streamError: true}
+	runner.Client = client
+	runner.Streaming = true
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "stream error", Workspace: root, Model: "test-model"})
+	if err != nil || outcome.Text != "fallback" || !client.streamed || !client.fallback {
+		t.Fatalf("streaming error fallback failed: outcome=%+v client=%+v error=%v", outcome, client, err)
+	}
 }
 
 func (client *sequenceClient) Create(_ context.Context, request model.Request) (model.Response, error) {

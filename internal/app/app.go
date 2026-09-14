@@ -19,6 +19,7 @@ import (
 	"github.com/diakovliev/doit/internal/config"
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
 	"github.com/diakovliev/doit/internal/gitinspect"
+	"github.com/diakovliev/doit/internal/mcpclient"
 	"github.com/diakovliev/doit/internal/model"
 	"github.com/diakovliev/doit/internal/modelhttp"
 	"github.com/diakovliev/doit/internal/policy"
@@ -426,6 +427,11 @@ type runtimeDependencies struct {
 	close   func()
 }
 
+type runtimeTools struct {
+	registry *tools.Registry
+	close    func()
+}
+
 func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (runtimeDependencies, error) {
 	profile, err := configuration.SelectedProfile()
 	if err != nil {
@@ -446,7 +452,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService, configuration.ToolProfile)
+	toolset, err := buildRuntimeTools(configuration, filesystem, processService, gitService)
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
@@ -456,15 +462,34 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 		}
 	}})
 	if err != nil {
+		toolset.close()
 		return runtimeDependencies{}, err
 	}
 	sessionStore, err := session.NewFileStore(session.Options{InvocationPath: configuration.Workspace, Ephemeral: configuration.Ephemeral})
 	if err != nil {
+		toolset.close()
 		return runtimeDependencies{}, err
 	}
 	contextBuilder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(gitService.StatusSummary)
-	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress}
-	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close() }}, nil
+	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: toolset.registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress, Streaming: profile.Streaming}
+	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close(); toolset.close() }}, nil
+}
+
+func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service) (runtimeTools, error) {
+	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService, "full")
+	if err != nil {
+		return runtimeTools{}, err
+	}
+	mcpRuntime, err := mcpclient.RegisterTools(context.Background(), registry, configuration.Workspace, configuration.MCPServers)
+	if err != nil {
+		return runtimeTools{}, err
+	}
+	registry, err = registry.Select(configuration.ToolProfile)
+	if err != nil {
+		_ = mcpRuntime.Close()
+		return runtimeTools{}, err
+	}
+	return runtimeTools{registry: registry, close: func() { _ = mcpRuntime.Close() }}, nil
 }
 
 func buildRegistry(workspace string, filesystem *workspacefs.Service, processService *processrunner.Runner) (*tools.Registry, error) {

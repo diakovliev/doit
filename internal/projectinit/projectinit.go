@@ -44,6 +44,7 @@ const configTemplate = `{
       "model": "replace-with-your-model"
     }
   },
+	"mcp_servers": {},
   "tasks": {}
 }
 `
