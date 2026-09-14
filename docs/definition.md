@@ -24,6 +24,10 @@ A non-interactive invocation that performs one focused task and exits with a sta
 
 An interactive session in which the user and model work through multiple related steps. Running `doit` in a terminal or using `doit agent` starts this mode.
 
+### Project Initialization
+
+The local `doit init` command that creates a project-local `.doit` scaffold containing backend configuration, repository instruction templates, and skill templates. Initialization does not contact a model or replace existing files.
+
 ### MVP
 
 The smallest safe local release: CLI startup, configuration, an interactive loop, an OpenAI-compatible model adapter, focused workspace tools, token accounting, local sessions, explicit approvals, and deterministic tests.

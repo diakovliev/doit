@@ -101,6 +101,7 @@ Implemented command paths:
 
 | Command | Purpose |
 | --- | --- |
+| `doit init` | Create project-local `.doit` configuration, instruction, and skill templates without contacting a model. Existing files are preserved. |
 | `doit` | Start the default agent request flow. |
 | `doit agent` | Run an agent request, reading a prompt from stdin when no prompt argument is supplied. |
 | `doit run <request>` | Run one development-oriented request and exit. |
@@ -109,6 +110,15 @@ Implemented command paths:
 | `doit version` | Print the CLI version. |
 
 The following names are recognized for future workflow implementations: `develop`, `review`, `test`, `status`, `model`, `config`, `session`, and `doctor`. Use `run` for the current general-purpose workflow.
+
+Initialize a workspace before adding project-specific guidance:
+
+```powershell
+doit init
+doit -C .\sample init
+```
+
+The command creates `.doit/config.json`, `.doit/instructions.md`, instruction and skill README files, and an example skill template. It never overwrites an existing scaffold file, so it can be run again after the project has been customized.
 
 ## Global Options
 
