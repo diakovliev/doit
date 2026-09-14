@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Phase 3 core complete; Phase 4 not started
+**Status:** Phase 4 complete; provider extensions and later workflow expansion remain deferred
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -88,8 +88,8 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 - Read-only filesystem and Git inspection is automatic within the effective scope.
 - `doit agent` requires confirmation for process execution, code writes, renames, deletes, and all Git index or history changes.
-- `doit run` is explicit workspace automation: it may execute allowlisted process tasks and local code changes without an interactive prompt, while path escapes, network access, remote Git operations, and rejected-risk tools remain denied.
-- Arbitrary shell pipelines, path escapes, writes outside the workspace, remote access, pushes, force operations, and history rewrites are rejected.
+- `doit run` is trusted workspace automation: configured operations contained by the effective workspace may execute without an interactive prompt, including destructive file changes, local Git mutations, and configured process tasks. Human review happens through the resulting change request, diff, validation results, and session evidence.
+- The effective workspace is the security boundary. Path escapes, symlink or working-directory escapes, and capabilities that are not explicitly configured remain denied; risk labels control reporting and review requirements but do not force confirmation inside trusted workspace automation.
 - JSON output remains non-interactive and does not emit approval prompts; confirmation-required actions are denied unless workspace automation is explicitly active.
 
 #### `DEC-006` Token Accounting
@@ -163,12 +163,21 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
-| `HARD-001` | Add security and boundary tests. | `MVP-001` | Workspace escapes, symlink escapes, command injection, secret leakage, oversized output, interrupted processes, and unsafe Git operations are covered. | `TODO` |
-| `HARD-002` | Add reviewable operational diagnostics. | `MVP-001` | Request IDs, provider errors, rate limits, tool timings, validation status, and redacted session evidence are available without credentials. | `TODO` |
-| `WORK-001` | Add dedicated `develop`, `review`, and `test` workflows. | `MVP-001`, `HARD-001` | Each workflow has focused context selection, output, validation, and exit-status tests. | `TODO` |
-| `WORK-002` | Add session resume, export, pruning, and recovery commands. | `SESSION-001`, `MVP-001` | Interrupted and completed sessions can be safely inspected, resumed, exported, and pruned under the documented policy. | `IN PROGRESS` |
+| `HARD-001` | Add security and boundary tests. | `MVP-001` | Workspace escapes, symlink escapes, command injection, secret leakage, oversized output, interrupted processes, and unsafe Git operations are covered. | `DONE` |
+| `HARD-002` | Add reviewable operational diagnostics. | `MVP-001` | Request IDs, provider errors, rate limits, tool timings, validation status, and redacted session evidence are available without credentials. | `DONE` |
+| `HARD-003` | Unify the effective-workspace boundary and side-effect policy. | `MVP-001`, `HARD-001`, `POL-001` | Trusted workspace automation can autonomously perform configured operations contained by the effective workspace, including destructive file, Git, and process actions; shared checks reject path, symlink, and working-directory escapes, and change-request evidence exposes effects for human review. | `DONE` |
+| `HARD-004` | Enforce the normalized tool contract and result accounting. | `FOUND-004`, `AGENT-001`, `HARD-003` | Tool schemas and arguments are validated centrally; declared timeouts, output limits, and argument limits are enforced; bounded diagnostics and changed paths reach the final outcome and session result. | `DONE` |
+| `TOOL-008` | Implement reviewable change sets and transactional edits. | `TOOL-004`, `TOOL-006`, `TOOL-007`, `HARD-003`, `HARD-004` | Writes produce bounded, reviewable change-set evidence with before/after hashes, approval identity, conflict detection, and atomic-or-rollback behavior across multi-file operations; patch tools support pre-apply preview and direct trusted mutations report applied evidence for human change-request review. | `DONE` |
+| `VALID-001` | Add structured validation task contracts and results. | `FOUND-007`, `HARD-004` | Configured tasks declare purpose and side effects, preserve the approved environment policy, and return normalized pass/fail, timeout, and file/line diagnostic data instead of only raw output. | `DONE` |
+| `TOOL-009` | Improve code search and repository change review. | `TOOL-001`, `TOOL-002`, `TOOL-008` | Search supports regex, case, context, file filters, and reliable globs; review can include untracked files and emit a complete bounded change patch. | `DONE` |
+| `AGENT-003` | Add capability-scoped tool profiles. | `FOUND-004`, `MODEL-001`, `HARD-004` | Inspection, editing, validation, Git-write, and destructive capabilities can be exposed separately, reducing prompt/schema overhead and supporting smaller local models without changing tool contracts. | `DONE` |
+| `GIT-001` | Add local branch and worktree awareness. | `TOOL-002`, `HARD-003` | Read-only branch/upstream/worktree state is structured, and explicitly authorized local branch operations remain workspace-scoped; remote operations stay excluded. | `DONE` |
+| `WORK-001` | Add dedicated `develop`, `review`, and `test` workflows. | `MVP-001`, `HARD-001`, `HARD-003`, `HARD-004`, `TOOL-008`, `TOOL-009`, `VALID-001` | Each workflow has focused context selection, output, validation, review, and exit-status tests. | `DONE` |
+| `WORK-002` | Add session resume, export, pruning, and recovery commands. | `SESSION-001`, `MVP-001` | Interrupted and completed sessions can be safely inspected, resumed, exported, and pruned under the documented policy. | `DONE` |
 | `WORK-002A` | Reuse the latest durable session automatically. | `SESSION-001`, `MVP-001` | Subsequent runs reuse the newest non-active resumable workspace session, replay bounded public turns, and support explicit fresh-session opt-outs. | `DONE` |
-| `WORK-003` | Add CI for the repository's required checks. | `HARD-001` | CI runs configured tests, formatting, lint, security, deterministic integration tests, and platform-specific checks without live model credentials. | `TODO` |
+| `WORK-003` | Add CI for the repository's required checks. | `HARD-001` | CI runs configured tests, formatting, lint, security, deterministic integration tests, and platform-specific checks without live model credentials. | `DONE` |
+
+Recommended implementation order for the new work is `HARD-003` -> `HARD-004` -> `TOOL-008`/`VALID-001` -> `TOOL-009` -> `AGENT-003` -> `GIT-001` -> `WORK-001`. This order fixes the execution boundary and observability contract before adding more automation surface.
 
 ## Deferred Work
 
@@ -223,3 +232,30 @@ Deferred work must not change the approval, observability, token accounting, ses
 | 2026-09-14 | `INIT-001` | Started project initialization scaffolding for `.doit` configuration, repository instructions, and skill templates with rooted, non-overwriting file creation. | Focused initialization tests pending |
 | 2026-09-14 | `INIT-001` | Added `doit init` parsing, rooted scaffold creation, human/JSON output, repeatable non-overwriting behavior, focused tests, and user documentation. | `go test ./internal/cli ./internal/app ./internal/projectinit`; disposable CLI probe created and re-ran the five-file scaffold successfully |
 | 2026-09-14 | `INIT-001` | Cleared the final test-lint complexity finding and completed repository validation. | `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, and `gosec ./...` all passed |
+| 2026-09-14 | `PLAN-002` | Converted the generic code-automation toolset review into `HARD-003`, `HARD-004`, `TOOL-008`, `VALID-001`, `TOOL-009`, `AGENT-003`, and `GIT-001`; tightened `WORK-001` dependencies around those prerequisites. | Read-only toolset and policy review; implementation pending |
+| 2026-09-14 | `PLAN-003` | Corrected the automation trust model: workspace automation is authorized to perform configured destructive local operations autonomously; the effective workspace boundary and review artifacts, not interactive confirmation, provide the safety contract. | User decision; follow-up policy and change-set implementation pending |
+| 2026-09-14 | `HARD-001`, `HARD-003` | Started Phase 4 boundary hardening: rooted code rename/patch writes and real-path validation for process working directories reject symlink escapes while preserving trusted workspace automation. | Focused `codetools` and `processrunner` tests passed |
+| 2026-09-14 | `HARD-004` | Propagated unique mutation paths from filesystem, code, and Git adapters into `agent.Outcome` and durable session results. | Focused agent, code, filesystem, and Git tests passed; changed-path regression added |
+| 2026-09-14 | `VALID-001` | Added configured task kinds, pass/fail metadata, working-directory identity, and bounded file/line diagnostics to process results. | Focused process, processrunner, config, and app tests passed |
+| 2026-09-14 | `TOOL-009` | Extended filesystem search with literal/regex modes, case control, bounded context lines, and basename-friendly globs. | Focused workspacefs tests passed |
+| 2026-09-14 | `AGENT-003` | Added configuration-backed `full`, `inspect`, `edit`, `validate`, `git-read`, `git-write`, and `destructive` tool profiles that filter the model-visible registry; `full` remains the default. | Focused tools, config, and app tests passed |
+| 2026-09-14 | `GIT-001` | Added read-only `git.branch` and `git.worktree` inspection for branch/upstream divergence and local worktree inventory. | Focused gitinspect tests passed |
+| 2026-09-14 | `HARD-001` | Added symlink-escape tests for code rename and process working directories, shell-composition rejection coverage, and retained existing session-redaction, truncation, timeout, and Git-scope tests. | Full repository validation passed |
+| 2026-09-14 | `HARD-002` | Added centralized tool execution durations to normalized results; request/provider diagnostics and complete change-request evidence remain follow-up work. | Focused tools tests passed |
+| 2026-09-14 | `HARD-004` | Completed centralized required-argument, argument-count, timeout, serialized-output, execution-duration, and changed-path enforcement across the tool registry and agent outcome. | Full validation matrix passed |
+| 2026-09-14 | `HARD-001`, `HARD-003`, `VALID-001`, `TOOL-009` | Completed the first Phase 4 hardening slice: rooted/symlink-safe code and process boundaries, shell-composition rejection, structured task results and diagnostics, regex/context search, and bounded untracked-file Git diffs. | Full validation matrix passed; 22 files scanned by `gosec`, 0 issues |
+| 2026-09-14 | `HARD-003`, `VALID-001` | Fixed configured process tasks that explicitly select the effective workspace root (`working_directory: "."`); root paths are now accepted while symlink escapes remain denied. | Direct root-task regression passed; `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, and `gosec ./...` all passed |
+| 2026-09-14 | `TOOL-008` | Added stable before/after SHA-256 change sets for `code.check_patch`, `code.apply_patch`, and `fs.write`; preview/apply share an ID, state transitions are explicit, and multi-file patch rollback remains atomic. | Focused codetools and workspacefs tests passed |
+| 2026-09-14 | `VALID-001` | Promoted structured `process.run` results into agent outcomes and persisted session validation records with task kind, pass/fail, timeout, truncation, duration, working directory, and diagnostics. | Focused agent/session/process tests passed |
+| 2026-09-14 | `TOOL-008`, `VALID-001` | Extended change-set and validation evidence through normalized tool results, agent outcomes, and durable session results; completed lint/test refactors and repository validation. | `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, `gosec ./...`, and `git diff --check` all passed |
+| 2026-09-14 | `TOOL-008` | Added policy authorization identity to change sets (`workspace-automation`, `interactive-approval`, or `policy-allow`) without changing trusted workspace autonomy. | Focused agent/tools tests and final Phase 4 validation matrix passed |
+| 2026-09-14 | `TOOL-008` | Extended normalized change-set evidence to filesystem move/mkdir/remove and Git stage/unstage/commit/restore mutations using bounded path or Git-state fingerprints. | Focused workspacefs and gitinspect tests passed |
+| 2026-09-14 | `TOOL-008` | Completed applied change-set evidence for all local filesystem and Git mutation tools; direct-mutation preview orchestration remains the next refinement while code patches retain preview/apply state. | Focused workspacefs/gitinspect tests and lint passed |
+| 2026-09-14 | `WORK-001` | Implemented local `develop`, `review`, and configured-task `test` workflows plus `status`, `model test`, `config list`, `doctor`, and session commands. | Focused CLI/app tests passed |
+| 2026-09-14 | `WORK-002` | Added session metadata listing, explicit resume by session ID, JSON inspect/export, and bounded prune support. | Focused agent/session tests passed |
+| 2026-09-14 | `WORK-003` | Added GitHub Actions validation for tests, vet, formatting, golangci-lint, and gosec. | Workflow file added; local validation matrix passed |
+| 2026-09-14 | `HARD-002`, `HARD-003` | Closed diagnostics and effective-workspace boundary hardening after request correlation, validation/session evidence, symlink confinement, trusted automation policy, and redaction coverage were in place. | Full local validation matrix passed |
+| 2026-09-14 | `TOOL-008` | Closed the change-set contract: patch operations retain preview/apply state, while trusted direct filesystem and Git mutations emit applied before/after evidence for remote human change-request review. | Full local validation matrix passed |
+| 2026-09-14 | `HARD-002` | Exposed generated client request IDs and provider `X-Request-Id`/`Request-Id` values in normalized model responses so session model events retain operational correlation data. | Focused model HTTP tests passed |
+| 2026-09-14 | `TOOL-008`, `HARD-002` | Completed the current Phase 4 slice for persisted change-set/validation evidence and request correlation. | `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, `gosec ./...`, and `git diff --check` all passed |
+| 2026-09-14 | `WORK-001`, `WORK-002`, `WORK-003` | Completed the Phase 4 command and delivery surface: develop/review/test workflows, status/config/model/doctor diagnostics, session list/inspect/export/resume/prune, and GitHub Actions CI. | Focused CLI/app/agent/session tests passed; full local validation matrix passed |

@@ -45,6 +45,16 @@ func TestParseNoResumeAliasStartsFreshSession(t *testing.T) {
 	}
 }
 
+func TestParseDevelopCarriesRequest(t *testing.T) {
+	invocation, err := Parse([]string{"develop", "add", "coverage"})
+	if err != nil {
+		t.Fatalf("parse develop invocation: %v", err)
+	}
+	if invocation.Command != "develop" || invocation.Request != "add coverage" {
+		t.Fatalf("unexpected develop invocation: %+v", invocation)
+	}
+}
+
 func TestParseInit(t *testing.T) {
 	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "init"})
 	if err != nil {

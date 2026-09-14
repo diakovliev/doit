@@ -29,6 +29,41 @@ func TestReadSearchHashAndListStayBounded(t *testing.T) {
 	requireHash(ctx, t, service)
 }
 
+func TestSearchSupportsRegexCaseAndContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatalf("make nested fixture: %v", err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "nested", "source.go"), "before\nTODO: FixThing\nafter\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	caseInsensitive := false
+	response, err := service.Search(context.Background(), SearchRequest{Query: `todo:\s+fixthing`, Mode: "regex", CaseSensitive: &caseInsensitive, Glob: "*.go", BeforeLines: 1, AfterLines: 1})
+	if err != nil || len(response.Matches) != 1 {
+		t.Fatalf("unexpected regex search response: %+v, error=%v", response, err)
+	}
+	match := response.Matches[0]
+	if match.Line != 2 || len(match.Before) != 1 || match.Before[0] != "before" || len(match.After) != 1 || match.After[0] != "after" {
+		t.Fatalf("unexpected search context: %+v", match)
+	}
+}
+
+func TestSearchRejectsUnknownMode(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.Search(context.Background(), SearchRequest{Query: "value", Mode: "glob"}); err == nil {
+		t.Fatal("expected unknown search mode to fail")
+	}
+	negative := -1
+	if _, err := service.Search(context.Background(), SearchRequest{Query: "value", BeforeLines: negative}); err == nil {
+		t.Fatal("expected negative context lines to fail")
+	}
+}
+
 func requireRead(ctx context.Context, t *testing.T, service *Service) {
 	t.Helper()
 	response, err := service.Read(ctx, ReadRequest{Path: "source.txt", MaxBytes: 12})
@@ -73,21 +108,51 @@ func TestRejectsWorkspaceEscape(t *testing.T) {
 
 func TestMkdirAndRemoveDirectoryTree(t *testing.T) {
 	root := t.TempDir()
+	service := newWorkspaceService(t, root)
+	createNestedDirectory(t, service, root)
+	assertNonRecursiveRemoveFails(t, service)
+	removed := removeNestedDirectory(t, service)
+	assertRemovedDirectory(t, removed, root)
+}
+
+func newWorkspaceService(t *testing.T, root string) *Service {
+	t.Helper()
 	service, err := New(root)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	return service
+}
+
+func createNestedDirectory(t *testing.T, service *Service, root string) {
+	t.Helper()
 	created, err := service.Mkdir(context.Background(), MkdirRequest{Path: "nested/dir", Parents: true})
-	if err != nil || created.Path != "nested/dir" {
+	if err != nil || created.Path != "nested/dir" || created.ChangeSet == nil {
 		t.Fatalf("unexpected mkdir response: %+v, error=%v", created, err)
 	}
 	writeWorkspaceFile(t, filepath.Join(root, "nested", "dir", "file.txt"), "content")
+}
+
+func assertNonRecursiveRemoveFails(t *testing.T, service *Service) {
+	t.Helper()
 	if _, err := service.Remove(context.Background(), RemoveRequest{Path: "nested/dir"}); err == nil {
 		t.Fatal("expected non-recursive directory removal to fail")
 	}
+}
+
+func removeNestedDirectory(t *testing.T, service *Service) RemoveResponse {
+	t.Helper()
 	removed, err := service.Remove(context.Background(), RemoveRequest{Path: "nested", Recursive: true})
-	if err != nil || removed.Path != "nested" || !removed.Recursive {
+	if err != nil || removed.Path != "nested" || !removed.Recursive || removed.ChangeSet == nil {
 		t.Fatalf("unexpected remove response: %+v, error=%v", removed, err)
+	}
+	return removed
+}
+
+func assertRemovedDirectory(t *testing.T, removed RemoveResponse, root string) {
+	t.Helper()
+	if removed.ChangeSet.BeforeHashes["nested"] == "" || removed.ChangeSet.AfterHashes["nested"] != "" {
+		t.Fatalf("unexpected remove change set: %+v", removed.ChangeSet)
 	}
 	if _, err := os.Stat(filepath.Join(root, "nested")); !os.IsNotExist(err) {
 		t.Fatalf("directory tree still exists: %v", err)
@@ -104,21 +169,60 @@ func TestWriteAndMoveFilesAndDirectories(t *testing.T) {
 	writeAndMoveDirectory(t, service, root)
 }
 
+func TestWriteProvidesChangeSet(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	response, err := service.Write(context.Background(), WriteRequest{Path: "created.txt", Content: "content"})
+	if err != nil || response.ChangeSet == nil {
+		t.Fatalf("write did not return a change set: %+v, error=%v", response, err)
+	}
+	if response.ChangeSet.Operation != "fs.write" || response.ChangeSet.State != "applied" || response.ChangeSet.BeforeHashes["created.txt"] != "" || response.ChangeSet.AfterHashes["created.txt"] == "" {
+		t.Fatalf("unexpected write change set: %+v", response.ChangeSet)
+	}
+}
+
 func writeAndMoveFile(t *testing.T, service *Service) {
+	t.Helper()
+	writeInitialFile(t, service)
+	assertOverwriteProtection(t, service)
+	writeReplacementFile(t, service)
+	assertMoveFile(t, service)
+}
+
+func writeInitialFile(t *testing.T, service *Service) {
 	t.Helper()
 	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "first", Parents: true})
 	if err != nil || !written.Created || written.Bytes != 5 {
 		t.Fatalf("unexpected write response: %+v, error=%v", written, err)
 	}
+}
+
+func assertOverwriteProtection(t *testing.T, service *Service) {
+	t.Helper()
 	if _, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second"}); err == nil {
 		t.Fatal("expected overwrite protection")
 	}
-	written, err = service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second", Overwrite: true})
+}
+
+func writeReplacementFile(t *testing.T, service *Service) {
+	t.Helper()
+	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second", Overwrite: true})
 	if err != nil || !written.Overwrote {
 		t.Fatalf("unexpected overwrite response: %+v, error=%v", written, err)
 	}
-	if _, err := service.Move(context.Background(), MoveRequest{From: "nested/file.txt", To: "nested/moved.txt"}); err != nil {
+}
+
+func assertMoveFile(t *testing.T, service *Service) {
+	t.Helper()
+	moved, err := service.Move(context.Background(), MoveRequest{From: "nested/file.txt", To: "nested/moved.txt"})
+	if err != nil || moved.ChangeSet == nil {
 		t.Fatalf("move file: %v", err)
+	}
+	if moved.ChangeSet.BeforeHashes["nested/file.txt"] == "" || moved.ChangeSet.AfterHashes["nested/file.txt"] != "" || moved.ChangeSet.AfterHashes["nested/moved.txt"] == "" {
+		t.Fatalf("unexpected move change set: %+v", moved.ChangeSet)
 	}
 }
 
@@ -174,6 +278,11 @@ func TestRegisterTools(t *testing.T) {
 		if !exists || len(tool.Definition().Parameters) == 0 {
 			t.Fatalf("directory tool is not registered with a schema: %s", name)
 		}
+	}
+	mkdirTool, _ := registry.Lookup("fs.mkdir")
+	result := mkdirTool.Execute(context.Background(), tools.Call{Arguments: []byte(`{"path":"adapter-dir"}`)})
+	if result.Status != tools.StatusSucceeded || result.ChangeSet == nil || result.ChangeSet.Operation != "fs.mkdir" {
+		t.Fatalf("filesystem adapter did not expose change set: %+v", result)
 	}
 }
 

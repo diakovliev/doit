@@ -100,7 +100,7 @@ The initial command surface is:
 | `doit doctor` | Run local diagnostics for configuration, credentials, workspace access, and required tools. | `doit doctor` |
 | `doit version` | Print the CLI version and build information. | `doit version` |
 
-`doit run` is the escape hatch for a request that does not fit a named workflow. The workflow commands provide stronger defaults and structured reports; they do not create separate model integrations.
+`doit run` is the escape hatch for a request that does not fit a named workflow. `doit develop` enables trusted workspace automation for a focused development request, while `doit review` keeps the model in read-oriented mode. `doit test`, `doit status`, `doit model test`, `doit config list`, `doit session`, and `doit doctor` provide local structured workflows without inventing separate model integrations.
 
 `doit init` is a local setup command. It creates the project-local `.doit` scaffold below the effective invocation path, reports newly created and already existing files, and never loads a backend or opens a model session. Initialization is safe to repeat because it does not overwrite existing files.
 
@@ -294,7 +294,17 @@ A normalized result has this conceptual shape:
     "data": {},
     "diagnostics": [],
     "changed_paths": [],
-    "truncated": false
+    "truncated": false,
+    "duration": "25ms",
+    "change_set": {
+        "id": "stable-content-hash",
+        "operation": "code.apply_patch",
+        "state": "preview",
+        "approval": "workspace-automation",
+        "paths": ["internal/example.go"],
+        "before_hashes": {"internal/example.go": "..."},
+        "after_hashes": {"internal/example.go": "..."}
+    }
 }
 ```
 
@@ -323,7 +333,7 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
 - `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
-All code writes must produce a diff or changed-path summary before completion. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch.
+All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch operations must support pre-apply preview and conflict validation; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
 
 **Git inspection** is first-class and must not be implemented by asking the model to compose arbitrary Git commands:
 
@@ -334,6 +344,8 @@ All code writes must produce a diff or changed-path summary before completion. A
 - `git.show`: Inspect a commit, tag, or object with bounded output.
 - `git.blame`: Return line ownership for a bounded file range when review context requires it.
 - `git.check_ignore`: Explain why a path is ignored before a tool attempts to read or write it.
+- `git.branch`: Report the current branch, optional upstream, and ahead/behind counts.
+- `git.worktree`: Report local worktree paths, HEADs, and branches.
 
 Git inspection must report the repository root when it differs from the effective workspace. It must not silently expand a file-write scope to the repository root.
 
@@ -341,7 +353,9 @@ Git inspection must report the repository root when it differs from the effectiv
 
 - `process.run`: Execute a named repository-configured task such as `check`, `format`, `lint`, `analyze`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
 
-The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
+The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns task kind, pass/fail state, exit status, duration, bounded stdout and stderr, timeout/truncation state, and bounded file/line diagnostics when its output follows a recognized diagnostic format. Normalized model responses retain the generated client request ID and provider request ID when the backend supplies one, so persisted session evidence can correlate failures without recording credentials.
+
+The project configuration may set `tool_profile` to `full`, `inspect`, `edit`, `validate`, `git-read`, `git-write`, or `destructive`. A profile limits which registered capabilities are offered to the model; it does not weaken workspace scope checks or authorize capabilities that are not registered.
 
 #### Explicit Git Write Operations
 
@@ -351,7 +365,9 @@ Local Git mutations are first-class workspace tools with structured arguments an
 - `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing and never includes unrelated paths.
 - `git.restore`: Restore explicitly selected paths from the index or `HEAD`; worktree restoration is destructive.
 
-`doit agent` confirms these operations individually. `doit run` may execute them as explicit workspace automation, while path confinement and Git validation remain active. The core agent must not push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, or alter remotes. Those operations remain outside the local automation contract.
+`doit agent` confirms these operations individually. `doit run` is trusted workspace automation and may execute configured local Git operations, including destructive ones, without an interactive prompt; path confinement, Git validation, and review artifacts remain active. Push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, and remote management require separate capabilities and are not implied by local workspace authorization.
+
+Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials.
 
 ### 4.6 Approval and Safety Policy
 
@@ -367,12 +383,12 @@ The policy layer decides whether a tool call can run automatically, requires con
 The default policy should use these risk levels:
 
 - **Read-only:** `fs.*` inspection and `git.*` inspection may run automatically within the workspace and configured repository scope.
-- **Validation:** `process.run` requires a configured task name and may run automatically only for commands explicitly marked safe. Tests and format checks must still respect timeouts and output limits.
-- **Write:** `code.apply_patch`, `code.rename`, and `code.format` require a preview and user confirmation in agent mode. `doit run` explicitly permits these operations within the workspace.
-- **Destructive or history-changing:** Deletes, `git.restore`, `git.commit`, branch changes, and any future remote operation require explicit confirmation for every invocation.
-- **Rejected by default:** Arbitrary shell commands, path escapes, writes outside the workspace, force operations, and remote Git changes.
+- **Validation:** `process.run` requires a configured task name. Trusted workspace automation may run configured tasks without confirmation, while interactive agent mode may confirm them; all tasks still respect timeouts, output limits, and their declared capability policy.
+- **Write:** `code.apply_patch`, `code.rename`, and `code.format` require a preview and user confirmation in interactive agent mode. Trusted workspace automation permits these operations within the workspace.
+- **Destructive or history-changing:** Deletes, `git.restore`, `git.commit`, and other configured local destructive operations are permitted in trusted workspace automation and must be represented in the change request and validation evidence. Interactive agent mode may require confirmation.
+- **Rejected by default:** Path escapes, symlink or working-directory escapes, writes outside the workspace, and capabilities that have not been explicitly configured. Remote or hosted operations require separate capability contracts.
 
-The policy layer must show the affected paths, proposed diff or Git change, command identity, and requested permissions before confirmation. In workspace automation mode, the same tool and path validation still applies, but confirmation is not requested for local changes. Users may choose stricter policies; permissive modes should be clearly visible.
+The policy layer must show the affected paths, proposed diff or Git change, command identity, and requested permissions before interactive confirmation. In workspace automation mode, the same boundary and argument validation still applies, but confirmation is not requested for configured local changes; the change request, diff, validation results, and session evidence provide the review surface. Users may choose stricter policies; permissive modes should be clearly visible.
 
 ### 4.7 Session Store
 

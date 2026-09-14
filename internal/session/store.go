@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +142,106 @@ func (store *FileStore) Latest(ctx context.Context) (ID, bool, error) {
 		return "", false, apperr.Wrap(apperr.KindTool, "session.latest", closeErr)
 	}
 	return newestSession(store.rootFS, entries)
+}
+
+// List returns bounded session metadata ordered from newest to oldest.
+func (store *FileStore) List(ctx context.Context) ([]Metadata, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.ephemeral {
+		return sortedMetadata(store.memoryMetadata()), nil
+	}
+	metadata, err := store.persistentMetadata()
+	if err != nil {
+		return nil, err
+	}
+	return sortedMetadata(metadata), nil
+}
+
+func (store *FileStore) memoryMetadata() []Metadata {
+	metadata := make([]Metadata, 0, len(store.memory))
+	for _, record := range store.memory {
+		metadata = append(metadata, record.Metadata)
+	}
+	return metadata
+}
+
+func (store *FileStore) persistentMetadata() ([]Metadata, error) {
+	directory, err := store.rootFS.Open(".")
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "session.list", err)
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "session.list", readErr)
+	}
+	if closeErr != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "session.list", closeErr)
+	}
+	metadata := make([]Metadata, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !validID(ID(entry.Name())) {
+			continue
+		}
+		item, err := readMetadata(store.rootFS, filepath.Join(entry.Name(), "manifest.json"))
+		if err != nil {
+			return nil, err
+		}
+		metadata = append(metadata, item)
+	}
+	return metadata, nil
+}
+
+func sortedMetadata(metadata []Metadata) []Metadata {
+	slices.SortFunc(metadata, func(first, second Metadata) int {
+		if first.UpdatedAt.After(second.UpdatedAt) {
+			return -1
+		}
+		if first.UpdatedAt.Before(second.UpdatedAt) {
+			return 1
+		}
+		return strings.Compare(string(first.ID), string(second.ID))
+	})
+	return metadata
+}
+
+// Prune removes the oldest non-active durable sessions beyond keep.
+func (store *FileStore) Prune(ctx context.Context, keep int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if keep < 0 {
+		return 0, apperr.New(apperr.KindUsage, "session.prune", "keep must not be negative")
+	}
+	metadata, err := store.List(ctx)
+	if err != nil {
+		return 0, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.ephemeral {
+		return 0, nil
+	}
+	kept := 0
+	removed := 0
+	for _, item := range metadata {
+		if item.Status == StatusActive {
+			continue
+		}
+		if kept < keep {
+			kept++
+			continue
+		}
+		if err := store.rootFS.RemoveAll(string(item.ID)); err != nil {
+			return removed, apperr.Wrap(apperr.KindTool, "session.prune", err)
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // Resume reopens a completed or failed session while preserving its history.

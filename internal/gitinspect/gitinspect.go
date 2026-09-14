@@ -5,9 +5,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -43,6 +47,35 @@ type RootResponse struct {
 	IsRepository bool   `json:"is_repository"`
 }
 
+// BranchRequest selects current branch metadata.
+type BranchRequest struct{}
+
+// BranchResponse describes the current branch and optional upstream state.
+type BranchResponse struct {
+	Repository string `json:"repository"`
+	Branch     string `json:"branch"`
+	Upstream   string `json:"upstream,omitempty"`
+	Detached   bool   `json:"detached"`
+	Ahead      int    `json:"ahead"`
+	Behind     int    `json:"behind"`
+}
+
+// WorktreeRequest selects local worktree metadata.
+type WorktreeRequest struct{}
+
+// WorktreeEntry describes one local Git worktree.
+type WorktreeEntry struct {
+	Path   string `json:"path"`
+	Head   string `json:"head"`
+	Branch string `json:"branch,omitempty"`
+	Bare   bool   `json:"bare"`
+}
+
+// WorktreeResponse contains the local worktree inventory.
+type WorktreeResponse struct {
+	Worktrees []WorktreeEntry `json:"worktrees"`
+}
+
 // Root discovers the containing Git repository and HEAD state.
 func (service *Service) Root(ctx context.Context, _ RootRequest) (RootResponse, error) {
 	repository, err := service.run(ctx, "rev-parse", "--show-toplevel")
@@ -51,6 +84,54 @@ func (service *Service) Root(ctx context.Context, _ RootRequest) (RootResponse, 
 	}
 	detached := service.isDetached(ctx)
 	return RootResponse{Workspace: service.workspace, Repository: strings.TrimSpace(repository), DetachedHead: detached, IsRepository: true}, nil
+}
+
+// Branch returns current branch and upstream divergence without changing Git state.
+func (service *Service) Branch(ctx context.Context, _ BranchRequest) (BranchResponse, error) {
+	root, err := service.Root(ctx, RootRequest{})
+	if err != nil {
+		return BranchResponse{}, err
+	}
+	branch, branchErr := service.run(ctx, "symbolic-ref", "--quiet", "--short", "HEAD")
+	response := BranchResponse{Repository: root.Repository, Branch: strings.TrimSpace(branch), Detached: branchErr != nil}
+	if response.Detached {
+		response.Branch = ""
+		return response, nil
+	}
+	response.Upstream = service.upstream(ctx)
+	if response.Upstream != "" {
+		response.Ahead, response.Behind = service.divergence(ctx)
+	}
+	return response, nil
+}
+
+func (service *Service) upstream(ctx context.Context) string {
+	upstream, err := service.run(ctx, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(upstream)
+}
+
+func (service *Service) divergence(ctx context.Context) (ahead, behind int) {
+	counts, err := service.run(ctx, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+	if err != nil {
+		return 0, 0
+	}
+	fields := strings.Fields(counts)
+	if len(fields) != 2 {
+		return 0, 0
+	}
+	return parseInt(fields[0]), parseInt(fields[1])
+}
+
+// Worktrees returns the local worktree inventory without changing Git state.
+func (service *Service) Worktrees(ctx context.Context, _ WorktreeRequest) (WorktreeResponse, error) {
+	output, err := service.run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return WorktreeResponse{}, err
+	}
+	return WorktreeResponse{Worktrees: parseWorktrees(output)}, nil
 }
 
 func (service *Service) isDetached(ctx context.Context) bool {
@@ -120,10 +201,11 @@ func (service *Service) StatusSummary(ctx context.Context) (string, error) {
 
 // DiffRequest selects a bounded diff source.
 type DiffRequest struct {
-	Source   string   `json:"source"`
-	Revision string   `json:"revision"`
-	Paths    []string `json:"paths"`
-	MaxBytes int      `json:"max_bytes"`
+	Source           string   `json:"source"`
+	Revision         string   `json:"revision"`
+	Paths            []string `json:"paths"`
+	MaxBytes         int      `json:"max_bytes"`
+	IncludeUntracked bool     `json:"include_untracked"`
 }
 
 // DiffResponse contains a bounded textual diff.
@@ -148,11 +230,103 @@ func (service *Service) Diff(ctx context.Context, request DiffRequest) (DiffResp
 	if maxBytes <= 0 || maxBytes > service.maxBytes {
 		maxBytes = service.maxBytes
 	}
+	if request.IncludeUntracked {
+		if request.Source != "" && request.Source != "worktree" {
+			return DiffResponse{}, apperr.New(apperr.KindUsage, "gitinspect.diff", "untracked files can only be included in a worktree diff")
+		}
+		untracked, untrackedErr := service.untrackedDiff(ctx, request.Paths, maxBytes-len(diff))
+		if untrackedErr != nil {
+			return DiffResponse{}, untrackedErr
+		}
+		diff += untracked
+	}
 	truncated := len(diff) > maxBytes
 	if truncated {
 		diff = diff[:maxBytes]
 	}
 	return DiffResponse{Source: request.Source, Revision: request.Revision, Diff: diff, Truncated: truncated}, nil
+}
+
+func (service *Service) untrackedDiff(ctx context.Context, requestedPaths []string, remaining int) (string, error) {
+	if remaining <= 0 {
+		return "", nil
+	}
+	paths, err := service.scopedPaths(requestedPaths)
+	if err != nil {
+		return "", err
+	}
+	arguments := []string{"ls-files", "--others", "--exclude-standard", "-z"}
+	if len(paths) > 0 {
+		arguments = append(arguments, "--")
+		arguments = append(arguments, paths...)
+	}
+	output, err := service.run(ctx, arguments...)
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindTool, "gitinspect.diff", err)
+	}
+	defer func() { _ = root.Close() }()
+	var builder strings.Builder
+	for _, path := range strings.Split(strings.TrimSuffix(output, "\x00"), "\x00") {
+		if path == "" || builder.Len() >= remaining {
+			break
+		}
+		patch, readErr := untrackedFilePatch(ctx, root, path, remaining-builder.Len())
+		if readErr != nil {
+			return "", readErr
+		}
+		builder.WriteString(patch)
+	}
+	return builder.String(), nil
+}
+
+func untrackedFilePatch(ctx context.Context, root *os.Root, path string, limit int) (string, error) {
+	info, err := root.Stat(path)
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindTool, "gitinspect.diff", err)
+	}
+	if info.IsDir() {
+		return "", nil
+	}
+	file, err := root.Open(path)
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindTool, "gitinspect.diff", err)
+	}
+	contents, readErr := io.ReadAll(io.LimitReader(file, int64(maxInt(0, limit))+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return "", apperr.Wrap(apperr.KindTool, "gitinspect.diff", readErr)
+	}
+	if closeErr != nil {
+		return "", apperr.Wrap(apperr.KindTool, "gitinspect.diff", closeErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	slashPath := filepath.ToSlash(path)
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "diff --git a/%s b/%s\nnew file mode %o\n--- /dev/null\n+++ b/%s\n", slashPath, slashPath, info.Mode().Perm(), slashPath)
+	if bytes.IndexByte(contents, 0) >= 0 {
+		builder.WriteString("Binary files /dev/null and b/")
+		builder.WriteString(slashPath)
+		builder.WriteString(" differ\n")
+		return builder.String(), nil
+	}
+	text := strings.TrimSuffix(string(contents), "\n")
+	lines := []string{}
+	if text != "" {
+		lines = strings.Split(text, "\n")
+	}
+	fmt.Fprintf(&builder, "@@ -0,0 +1,%d @@\n", len(lines))
+	for _, line := range lines {
+		builder.WriteByte('+')
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
+	return builder.String(), nil
 }
 
 func (service *Service) diffArguments(request DiffRequest) ([]string, error) {
@@ -341,13 +515,18 @@ type StageRequest struct {
 
 // StageResponse describes paths added to the index.
 type StageResponse struct {
-	Paths  []string `json:"paths"`
-	Staged []string `json:"staged"`
+	Paths     []string         `json:"paths"`
+	Staged    []string         `json:"staged"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Stage adds explicitly selected workspace paths to the index.
 func (service *Service) Stage(ctx context.Context, request StageRequest) (StageResponse, error) {
 	paths, err := service.mutationPaths(request.Paths, "gitinspect.stage")
+	if err != nil {
+		return StageResponse{}, err
+	}
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return StageResponse{}, err
 	}
@@ -358,7 +537,15 @@ func (service *Service) Stage(ctx context.Context, request StageRequest) (StageR
 	if err != nil {
 		return StageResponse{}, err
 	}
-	return StageResponse{Paths: paths, Staged: staged}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return StageResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.stage", "applied", paths, before, after)
+	if err != nil {
+		return StageResponse{}, err
+	}
+	return StageResponse{Paths: paths, Staged: staged, ChangeSet: changeSet}, nil
 }
 
 // UnstageRequest selects workspace paths to remove from the index.
@@ -368,7 +555,8 @@ type UnstageRequest struct {
 
 // UnstageResponse describes paths removed from the index.
 type UnstageResponse struct {
-	Paths []string `json:"paths"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Unstage removes explicitly selected workspace paths from the index.
@@ -377,11 +565,23 @@ func (service *Service) Unstage(ctx context.Context, request UnstageRequest) (Un
 	if err != nil {
 		return UnstageResponse{}, err
 	}
+	before, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
 	arguments := append([]string{"reset", "--"}, paths...)
 	if _, err := service.run(ctx, arguments...); err != nil {
 		return UnstageResponse{}, err
 	}
-	return UnstageResponse{Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.unstage", "applied", paths, before, after)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
+	return UnstageResponse{Paths: paths, ChangeSet: changeSet}, nil
 }
 
 // CommitRequest creates a commit from explicitly selected staged paths.
@@ -392,21 +592,34 @@ type CommitRequest struct {
 
 // CommitResponse describes the created commit.
 type CommitResponse struct {
-	Hash    string   `json:"hash"`
-	Message string   `json:"message"`
-	Paths   []string `json:"paths"`
+	Hash      string           `json:"hash"`
+	Message   string           `json:"message"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Commit stages and commits only the explicitly selected workspace paths.
 func (service *Service) Commit(ctx context.Context, request CommitRequest) (CommitResponse, error) {
 	message := strings.TrimSpace(request.Message)
+	paths, err := service.commitPaths(request.Paths, message)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	return service.commitPathsWithMessage(ctx, paths, message)
+}
+
+func (service *Service) commitPaths(paths []string, message string) ([]string, error) {
 	if message == "" {
-		return CommitResponse{}, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message is required")
+		return nil, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message is required")
 	}
 	if len(message) > 2000 {
-		return CommitResponse{}, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message exceeds 2000 bytes")
+		return nil, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message exceeds 2000 bytes")
 	}
-	paths, err := service.mutationPaths(request.Paths, "gitinspect.commit")
+	return service.mutationPaths(paths, "gitinspect.commit")
+}
+
+func (service *Service) commitPathsWithMessage(ctx context.Context, paths []string, message string) (CommitResponse, error) {
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return CommitResponse{}, err
 	}
@@ -428,7 +641,15 @@ func (service *Service) Commit(ctx context.Context, request CommitRequest) (Comm
 	if err != nil {
 		return CommitResponse{}, err
 	}
-	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.commit", "applied", paths, before, after)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths, ChangeSet: changeSet}, nil
 }
 
 // RestoreRequest selects paths and the local state to restore.
@@ -439,13 +660,18 @@ type RestoreRequest struct {
 
 // RestoreResponse describes paths restored from the index or HEAD.
 type RestoreResponse struct {
-	Mode  string   `json:"mode"`
-	Paths []string `json:"paths"`
+	Mode      string           `json:"mode"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Restore restores selected worktree or index paths using fixed local modes.
 func (service *Service) Restore(ctx context.Context, request RestoreRequest) (RestoreResponse, error) {
 	paths, err := service.mutationPaths(request.Paths, "gitinspect.restore")
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return RestoreResponse{}, err
 	}
@@ -464,7 +690,15 @@ func (service *Service) Restore(ctx context.Context, request RestoreRequest) (Re
 	if _, err := service.run(ctx, arguments...); err != nil {
 		return RestoreResponse{}, err
 	}
-	return RestoreResponse{Mode: request.Mode, Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.restore", "applied", paths, before, after)
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	return RestoreResponse{Mode: request.Mode, Paths: paths, ChangeSet: changeSet}, nil
 }
 
 func (service *Service) stagedPaths(ctx context.Context, paths []string) ([]string, error) {
@@ -486,6 +720,42 @@ func (service *Service) stagePaths(ctx context.Context, paths []string) error {
 	arguments := append([]string{"add", "--"}, paths...)
 	_, err := service.run(ctx, arguments...)
 	return err
+}
+
+func (service *Service) mutationStateHashes(ctx context.Context, paths []string) (map[string]string, error) {
+	hashes := make(map[string]string, len(paths))
+	for _, path := range paths {
+		status, err := service.run(ctx, "status", "--porcelain=v1", "-z", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		worktree, err := service.run(ctx, "diff", "--name-status", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		index, err := service.run(ctx, "diff", "--cached", "--name-status", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		state := status + "\x00" + worktree + "\x00" + index
+		digest := sha256.Sum256([]byte(state))
+		hashes[path] = hex.EncodeToString(digest[:])
+	}
+	return hashes, nil
+}
+
+func gitChangeSet(operation, state string, paths []string, beforeHashes, afterHashes map[string]string) (*tools.ChangeSet, error) {
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: operation, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "gitinspect.change_set", err)
+	}
+	digest := sha256.Sum256(identity)
+	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: operation, State: state, Paths: append([]string(nil), paths...), BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
 }
 
 func (service *Service) noSelectedChangesError(ctx context.Context, paths []string) error {
@@ -540,6 +810,14 @@ func gitReadAdapters(service *Service) []toolAdapter {
 			var request RootRequest
 			return service.Root(ctx, request)
 		}},
+		{name: "git.branch", description: "Inspect the current branch, upstream, and divergence.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+			var request BranchRequest
+			return service.Branch(ctx, request)
+		}},
+		{name: "git.worktree", description: "List local Git worktrees and their branches.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+			var request WorktreeRequest
+			return service.Worktrees(ctx, request)
+		}},
 		{name: "git.status", description: "Inspect bounded staged and worktree status.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"include_ignored":{"type":"boolean"}}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StatusRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
@@ -547,7 +825,7 @@ func gitReadAdapters(service *Service) []toolAdapter {
 			}
 			return service.Status(ctx, request)
 		}},
-		{name: "git.diff", description: "Read a bounded worktree, index, or revision diff.", parameters: `{"type":"object","properties":{"source":{"type":"string","enum":["worktree","index","range"]},"revision":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},"max_bytes":{"type":"integer"}},"required":["source"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.diff", description: "Read a bounded worktree, index, or revision diff, optionally including untracked files.", parameters: `{"type":"object","properties":{"source":{"type":"string","enum":["worktree","index","range"]},"revision":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},"max_bytes":{"type":"integer","minimum":1},"include_untracked":{"type":"boolean"}},"required":["source"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request DiffRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -587,28 +865,28 @@ func gitReadAdapters(service *Service) []toolAdapter {
 
 func gitMutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.stage", description: "Stage explicit workspace paths for a later commit.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.stage", description: "Stage explicit workspace paths for a later commit.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Stage(ctx, request)
 		}},
-		{name: "git.unstage", description: "Remove explicit workspace paths from the Git index without changing files.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.unstage", description: "Remove explicit workspace paths from the Git index without changing files.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request UnstageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Unstage(ctx, request)
 		}},
-		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Validate the selected diff before calling this tool.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Validate the selected diff before calling this tool.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request CommitRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Commit(ctx, request)
 		}},
-		{name: "git.restore", description: "Restore explicit paths from the index, worktree, or HEAD. This can discard local changes.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"}}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.restore", description: "Restore explicit paths from the index, worktree, or HEAD. This can discard local changes.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"}}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RestoreRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -619,11 +897,13 @@ func gitMutationAdapters(service *Service) []toolAdapter {
 }
 
 type toolAdapter struct {
-	name        string
-	description string
-	parameters  string
-	risk        tools.Risk
-	execute     func(context.Context, tools.Call) (any, error)
+	name         string
+	description  string
+	parameters   string
+	risk         tools.Risk
+	changedPaths func(any) []string
+	changeSet    func(any) *tools.ChangeSet
+	execute      func(context.Context, tools.Call) (any, error)
 }
 
 func (adapter toolAdapter) Definition() tools.Definition {
@@ -635,8 +915,41 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	if err != nil {
 		return tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Message: err.Error()}}}
 	}
-	return tools.Result{Status: tools.StatusSucceeded, Data: data}
+	result := tools.Result{Status: tools.StatusSucceeded, Data: data}
+	if adapter.changedPaths != nil {
+		result.ChangedPaths = adapter.changedPaths(data)
+	}
+	if adapter.changeSet != nil {
+		result.ChangeSet = adapter.changeSet(data)
+	}
+	return result
 }
+
+func gitPathsChangedPaths(data any) []string {
+	response, ok := data.(interface{ changedPaths() []string })
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), response.changedPaths()...)
+}
+
+func (response StageResponse) changedPaths() []string   { return response.Paths }
+func (response UnstageResponse) changedPaths() []string { return response.Paths }
+func (response CommitResponse) changedPaths() []string  { return response.Paths }
+func (response RestoreResponse) changedPaths() []string { return response.Paths }
+
+func gitChangeSetFromData(data any) *tools.ChangeSet {
+	response, ok := data.(interface{ gitChangeSet() *tools.ChangeSet })
+	if !ok {
+		return nil
+	}
+	return response.gitChangeSet()
+}
+
+func (response StageResponse) gitChangeSet() *tools.ChangeSet   { return response.ChangeSet }
+func (response UnstageResponse) gitChangeSet() *tools.ChangeSet { return response.ChangeSet }
+func (response CommitResponse) gitChangeSet() *tools.ChangeSet  { return response.ChangeSet }
+func (response RestoreResponse) gitChangeSet() *tools.ChangeSet { return response.ChangeSet }
 
 func (service *Service) scopedPath(path string) (string, error) {
 	if path == "" {
@@ -701,6 +1014,54 @@ func parsePorcelainStatus(output string) []StatusEntry {
 	return entries
 }
 
+func parseWorktrees(output string) []WorktreeEntry {
+	worktrees := make([]WorktreeEntry, 0)
+	current := WorktreeEntry{}
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			worktrees, current = appendWorktree(worktrees, current)
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			worktrees, current = appendWorktree(worktrees, current)
+			current.Path = strings.TrimPrefix(line, "worktree ")
+			continue
+		}
+		parseWorktreeField(&current, line)
+	}
+	worktrees, _ = appendWorktree(worktrees, current)
+	return worktrees
+}
+
+func appendWorktree(worktrees []WorktreeEntry, current WorktreeEntry) ([]WorktreeEntry, WorktreeEntry) {
+	if current.Path != "" || current.Bare {
+		worktrees = append(worktrees, current)
+	}
+	return worktrees, WorktreeEntry{}
+}
+
+func parseWorktreeField(entry *WorktreeEntry, line string) {
+	switch {
+	case strings.HasPrefix(line, "HEAD "):
+		entry.Head = strings.TrimPrefix(line, "HEAD ")
+	case strings.HasPrefix(line, "branch "):
+		entry.Branch = strings.TrimPrefix(line, "branch ")
+	case line == "bare":
+		entry.Bare = true
+	}
+}
+
+func parseInt(value string) int {
+	number := 0
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0
+		}
+		number = number*10 + int(character-'0')
+	}
+	return number
+}
+
 func parseBlame(output string) BlameResponse {
 	response := BlameResponse{Lines: make([]BlameLine, 0)}
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -719,4 +1080,11 @@ func parseBlame(output string) BlameResponse {
 		}
 	}
 	return response
+}
+
+func maxInt(first, second int) int {
+	if first > second {
+		return first
+	}
+	return second
 }

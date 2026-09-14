@@ -35,8 +35,8 @@ type ApprovalPolicy interface {
 // DefaultPolicy implements the Phase 1 conservative policy.
 type DefaultPolicy struct{}
 
-// Decide allows scoped read-only actions, confirms local side effects, and
-// rejects unsafe or out-of-scope operations.
+// Decide allows scoped automation, confirms local side effects in interactive
+// mode, and rejects out-of-scope operations.
 func (DefaultPolicy) Decide(ctx context.Context, action Action) Decision {
 	if ctx.Err() != nil {
 		return DecisionCancel

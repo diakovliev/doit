@@ -76,12 +76,26 @@ func decodeTimeout(data json.RawMessage) (time.Duration, error) {
 
 // Result is the normalized outcome of a process task.
 type Result struct {
-	ExitCode  int           `json:"exit_code"`
-	Stdout    string        `json:"stdout"`
-	Stderr    string        `json:"stderr"`
-	Duration  time.Duration `json:"duration"`
-	TimedOut  bool          `json:"timed_out"`
-	Truncated bool          `json:"truncated"`
+	Task             string        `json:"task"`
+	Kind             string        `json:"kind,omitempty"`
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Passed           bool          `json:"passed"`
+	ExitCode         int           `json:"exit_code"`
+	Stdout           string        `json:"stdout"`
+	Stderr           string        `json:"stderr"`
+	Diagnostics      []Diagnostic  `json:"diagnostics,omitempty"`
+	Duration         time.Duration `json:"duration"`
+	TimedOut         bool          `json:"timed_out"`
+	Truncated        bool          `json:"truncated"`
+}
+
+// Diagnostic identifies a machine-readable process failure or warning.
+type Diagnostic struct {
+	Path     string `json:"path,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Message  string `json:"message"`
 }
 
 // Runner executes only configured tasks.

@@ -10,6 +10,7 @@ import (
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
 	"github.com/diakovliev/doit/internal/model"
 	"github.com/diakovliev/doit/internal/policy"
+	"github.com/diakovliev/doit/internal/process"
 	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
 	"github.com/diakovliev/doit/internal/usage"
@@ -55,6 +56,20 @@ func TestRunnerAutomaticallyResumesLatestWorkspaceSession(t *testing.T) {
 	}
 }
 
+func TestRunnerResumesExplicitSessionID(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, false)
+	defer func() { _ = store.Close() }()
+	first, err := runner.Run(context.Background(), Task{Command: "run", Request: "first request", Workspace: root, Model: "test-model", NewSession: true})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second, err := runner.Run(context.Background(), Task{Command: "run", Request: "resume request", Workspace: root, Model: "test-model", SessionID: string(first.SessionID)})
+	if err != nil || second.SessionID != first.SessionID {
+		t.Fatalf("explicit resume failed: first=%q second=%q error=%v", first.SessionID, second.SessionID, err)
+	}
+}
+
 func TestResumeHistoryDropsOrphanedAndIncompleteToolItems(t *testing.T) {
 	request := model.Request{Input: []model.InputItem{
 		{Type: "function_call_output", CallID: "orphan", Output: "{}"},
@@ -93,6 +108,100 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	record, err := store.Load(context.Background(), outcome.SessionID)
 	if err != nil || len(record.Events) < 3 || record.Result == nil {
 		t.Fatalf("unexpected session: %+v, error=%v", record, err)
+	}
+}
+
+type changedPathTool struct{}
+
+func (changedPathTool) Definition() tools.Definition {
+	return tools.Definition{Name: "fs.write", Risk: tools.RiskWrite}
+}
+
+func (changedPathTool) Execute(context.Context, tools.Call) tools.Result {
+	return tools.Result{Status: tools.StatusSucceeded, ChangedPaths: []string{"generated.txt"}, ChangeSet: &tools.ChangeSet{ID: "change-1", Operation: "fs.write", State: "applied", Paths: []string{"generated.txt"}}}
+}
+
+func TestRunnerAggregatesChangedPathsIntoOutcome(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentRunnerWithTool(t, root, changedPathTool{}, []model.Response{
+		{ID: "call", Status: "in_progress", ToolCalls: []model.ToolCall{{CallID: "1", Name: "fs.write", Arguments: `{}`}}},
+		{ID: "done", Status: "completed", Text: "finished"},
+	})
+	defer func() { _ = store.Close() }()
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "make a file", Workspace: root, Model: "test-model", WorkspaceAutomation: true, NonInteractive: true})
+	if err != nil {
+		t.Fatalf("run changed-path task: %v", err)
+	}
+	assertChangedPathOutcome(t, outcome)
+	record, err := store.Load(context.Background(), outcome.SessionID)
+	assertPersistedChangeSet(t, record, err)
+}
+
+type validationTool struct{}
+
+func (validationTool) Definition() tools.Definition {
+	return tools.Definition{Name: "process.run", Risk: tools.RiskProcess}
+}
+
+func (validationTool) Execute(context.Context, tools.Call) tools.Result {
+	return tools.Result{Status: tools.StatusSucceeded, Data: process.Result{Task: "test", Kind: "test", WorkingDirectory: ".", Passed: true, ExitCode: 0}}
+}
+
+func TestRunnerPersistsValidationResults(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentRunnerWithTool(t, root, validationTool{}, []model.Response{
+		{ID: "validation", Status: "in_progress", ToolCalls: []model.ToolCall{{CallID: "1", Name: "process.run", Arguments: `{}`}}},
+		{ID: "done", Status: "completed", Text: "validated"},
+	})
+	defer func() { _ = store.Close() }()
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "validate", Workspace: root, Model: "test-model", WorkspaceAutomation: true, NonInteractive: true})
+	if err != nil {
+		t.Fatalf("run validation task: %v", err)
+	}
+	if len(outcome.Validations) != 1 || !outcome.Validations[0].Passed {
+		t.Fatalf("unexpected validation outcome: %+v, error=%v", outcome, err)
+	}
+	record, err := store.Load(context.Background(), outcome.SessionID)
+	if err != nil {
+		t.Fatalf("load validation session: %v", err)
+	}
+	if record.Result == nil || len(record.Result.Validations) != 1 || record.Result.Validations[0].Task != "test" {
+		t.Fatalf("validation was not persisted: %+v", record.Result)
+	}
+}
+
+func newAgentRunnerWithTool(t *testing.T, root string, tool tools.Tool, responses []model.Response) (Runner, *session.FileStore) {
+	t.Helper()
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("register test tool: %v", err)
+	}
+	store, err := session.NewFileStore(session.Options{InvocationPath: root, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("new session store: %v", err)
+	}
+	client := &sequenceClient{responses: responses}
+	return Runner{Client: client, Context: contextdata.New(filesystem, usage.ByteEstimator{}), Tools: registry, Policy: policy.DefaultPolicy{}, Sessions: store}, store
+}
+
+func assertChangedPathOutcome(t *testing.T, outcome Outcome) {
+	t.Helper()
+	if len(outcome.ChangedPaths) != 1 || outcome.ChangedPaths[0] != "generated.txt" {
+		t.Fatalf("unexpected changed paths: %+v", outcome.ChangedPaths)
+	}
+	if len(outcome.ChangeSets) != 1 || outcome.ChangeSets[0].ID != "change-1" || outcome.ChangeSets[0].Approval != "workspace-automation" {
+		t.Fatalf("unexpected change sets: %+v", outcome.ChangeSets)
+	}
+}
+
+func assertPersistedChangeSet(t *testing.T, record session.Record, err error) {
+	t.Helper()
+	if err != nil || record.Result == nil || len(record.Result.ChangeSets) != 1 || record.Result.ChangeSets[0].ID != "change-1" {
+		t.Fatalf("change set was not persisted: %+v, error=%v", record.Result, err)
 	}
 }
 

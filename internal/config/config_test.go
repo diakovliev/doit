@@ -12,6 +12,7 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
 	userFile := filepath.Join(workspace, "user.json")
 	writeConfigFile(t, projectFile, `{
   "default_profile": "project",
+	"tool_profile": "edit",
   "format": "human",
   "profiles": {"project": {"api_root": "https://project.example/v1", "model": "project-model"}},
 	"tasks": {"probe": {"executable": "git", "arguments": ["--version"]}},
@@ -33,21 +34,29 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if configuration.Profile != "project" || configuration.Format != "json" || !configuration.Ephemeral {
-		t.Fatalf("unexpected effective config: %+v", configuration)
-	}
-	if configuration.Token.MaxInputTokens != 1000 || configuration.Token.MaxOutputTokens != 2000 {
-		t.Fatalf("unexpected token budgets: %+v", configuration.Token)
-	}
-	if configuration.Tasks["probe"].Executable != "git" {
-		t.Fatalf("expected configured project task: %+v", configuration.Tasks)
-	}
+	assertPrecedenceConfig(t, configuration)
 	profile, err := configuration.SelectedProfile()
 	if err != nil {
 		t.Fatalf("select profile: %v", err)
 	}
 	if profile.Model != "env-model" {
 		t.Fatalf("expected environment model override, got %q", profile.Model)
+	}
+}
+
+func assertPrecedenceConfig(t *testing.T, configuration Config) {
+	t.Helper()
+	if configuration.Profile != "project" || configuration.Format != "json" || !configuration.Ephemeral {
+		t.Fatalf("unexpected effective config: %+v", configuration)
+	}
+	if configuration.ToolProfile != "edit" {
+		t.Fatalf("expected configured tool profile, got %q", configuration.ToolProfile)
+	}
+	if configuration.Token.MaxInputTokens != 1000 || configuration.Token.MaxOutputTokens != 2000 {
+		t.Fatalf("unexpected token budgets: %+v", configuration.Token)
+	}
+	if configuration.Tasks["probe"].Executable != "git" {
+		t.Fatalf("expected configured project task: %+v", configuration.Tasks)
 	}
 }
 

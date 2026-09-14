@@ -21,6 +21,68 @@ func TestFileStorePersistsOrderedRedactedSession(t *testing.T) {
 	assertPersistedSession(t, root, id, eventData, reloaded)
 }
 
+func TestFileStoreListsSessionMetadataNewestFirst(t *testing.T) {
+	store := newStore(t, t.TempDir(), true)
+	defer func() { _ = store.Close() }()
+	completeNamedSession(t, store, "first")
+	completeNamedSession(t, store, "second")
+	metadata, err := store.List(context.Background())
+	assertSessionList(t, metadata, err)
+}
+
+func completeNamedSession(t *testing.T, store *FileStore, command string) ID {
+	t.Helper()
+	id, err := store.Start(context.Background(), Metadata{Command: command})
+	if err != nil {
+		t.Fatalf("start %s session: %v", command, err)
+	}
+	if err := store.Complete(context.Background(), id, Result{Summary: command}); err != nil {
+		t.Fatalf("complete %s session: %v", command, err)
+	}
+	return id
+}
+
+func assertSessionList(t *testing.T, metadata []Metadata, err error) {
+	t.Helper()
+	if err != nil || len(metadata) != 2 || metadata[0].UpdatedAt.Before(metadata[1].UpdatedAt) {
+		t.Fatalf("unexpected session list: %+v, error=%v", metadata, err)
+	}
+	commands := map[string]bool{metadata[0].Command: true, metadata[1].Command: true}
+	if !commands["first"] || !commands["second"] {
+		t.Fatalf("session list omitted a session: %+v", metadata)
+	}
+}
+
+func TestFileStorePrunesOldSessions(t *testing.T) {
+	store, err := NewFileStore(Options{InvocationPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	first, err := store.Start(context.Background(), Metadata{Command: "first"})
+	if err != nil {
+		t.Fatalf("start first session: %v", err)
+	}
+	if err := store.Complete(context.Background(), first, Result{Summary: "first"}); err != nil {
+		t.Fatalf("complete first session: %v", err)
+	}
+	second, err := store.Start(context.Background(), Metadata{Command: "second"})
+	if err != nil {
+		t.Fatalf("start second session: %v", err)
+	}
+	if err := store.Complete(context.Background(), second, Result{Summary: "second"}); err != nil {
+		t.Fatalf("complete second session: %v", err)
+	}
+	removed, err := store.Prune(context.Background(), 1)
+	if err != nil || removed != 1 {
+		t.Fatalf("unexpected prune result: removed=%d error=%v", removed, err)
+	}
+	metadata, err := store.List(context.Background())
+	if err != nil || len(metadata) != 1 {
+		t.Fatalf("unexpected sessions after prune: %+v, error=%v", metadata, err)
+	}
+}
+
 func newStore(t *testing.T, root string, ephemeral bool) *FileStore {
 	t.Helper()
 	store, err := NewFileStore(Options{InvocationPath: root, Ephemeral: ephemeral, MaxEventBytes: 512})

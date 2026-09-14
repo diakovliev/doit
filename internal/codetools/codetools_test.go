@@ -11,17 +11,40 @@ import (
 func TestPatchPreviewAndApply(t *testing.T) {
 	root, service := newCodeService(t)
 	patch := "*** Update File: file.txt\n+new\n"
+	preview := requirePatchPreview(t, service, patch)
+	result := requirePatchApply(t, service, patch)
+	assertPatchChangeSet(t, preview, result)
+	contents := readCodeFixture(t, root)
+	if string(contents) != "new\n" {
+		t.Fatalf("unexpected file content: %q", contents)
+	}
+}
+
+func requirePatchPreview(t *testing.T, service *Service, patch string) PatchResponse {
+	t.Helper()
 	preview, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch, DryRun: true})
-	if err != nil || preview.Applied || !preview.Changed {
+	if err != nil || preview.Applied || !preview.Changed || preview.ChangeSet == nil || preview.ChangeSet.State != "preview" {
 		t.Fatalf("unexpected preview: %+v, error=%v", preview, err)
 	}
+	return preview
+}
+
+func requirePatchApply(t *testing.T, service *Service, patch string) PatchResponse {
+	t.Helper()
 	result, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch})
-	if err != nil || !result.Applied {
+	if err != nil || !result.Applied || result.ChangeSet == nil || result.ChangeSet.State != "applied" {
 		t.Fatalf("unexpected apply result: %+v, error=%v", result, err)
 	}
-	contents := readCodeFixture(t, root)
-	if err != nil || string(contents) != "new\n" {
-		t.Fatalf("unexpected file content: %q, error=%v", contents, err)
+	return result
+}
+
+func assertPatchChangeSet(t *testing.T, preview, result PatchResponse) {
+	t.Helper()
+	if result.ChangeSet.ID != preview.ChangeSet.ID {
+		t.Fatalf("preview/apply change-set IDs differ: %q != %q", preview.ChangeSet.ID, result.ChangeSet.ID)
+	}
+	if result.ChangeSet.BeforeHashes["file.txt"] == "" || result.ChangeSet.AfterHashes["file.txt"] == "" || result.ChangeSet.BeforeHashes["file.txt"] == result.ChangeSet.AfterHashes["file.txt"] {
+		t.Fatalf("unexpected change-set hashes: %+v", result.ChangeSet)
 	}
 }
 
@@ -70,6 +93,27 @@ func TestPatchRejectsHashConflictAndPathEscape(t *testing.T) {
 	}
 }
 
+func TestRenameRejectsSymlinkEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace, "linked")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "source.txt"), []byte("content"), 0600); err != nil {
+		t.Fatalf("write source fixture: %v", err)
+	}
+	service, err := New(workspace, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.Rename(context.Background(), RenameRequest{From: "source.txt", To: "linked/moved.txt"}); err == nil {
+		t.Fatal("expected rename through an escaping symlink to fail")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "moved.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rename escaped workspace: %v", err)
+	}
+}
+
 func TestPatchUpdatePreservesUnchangedContent(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "file.txt")
@@ -114,5 +158,28 @@ func TestPatchReportsAndSkipsNoOp(t *testing.T) {
 	}
 	if contents := readCodeFixture(t, root); string(contents) != "old\n" {
 		t.Fatalf("unexpected no-op content: %q", contents)
+	}
+}
+
+func TestPatchRollsBackEarlierOperationsWhenLaterOperationFails(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open fixture root: %v", err)
+	}
+	err = service.applyOperations(rootHandle, []patchOperation{
+		{path: "created.txt", content: "created\n"},
+		{path: "missing.txt", delete: true},
+	})
+	_ = rootHandle.Close()
+	if err == nil {
+		t.Fatal("expected second operation to fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, "created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("earlier operation was not rolled back: %v", err)
 	}
 }

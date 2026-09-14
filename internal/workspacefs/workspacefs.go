@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/diakovliev/doit/internal/apperr"
@@ -253,15 +254,21 @@ type SearchRequest struct {
 	Query          string `json:"query"`
 	Path           string `json:"path"`
 	Glob           string `json:"glob"`
+	Mode           string `json:"mode"`
+	CaseSensitive  *bool  `json:"case_sensitive,omitempty"`
+	BeforeLines    int    `json:"before_lines"`
+	AfterLines     int    `json:"after_lines"`
 	MaxResults     int    `json:"max_results"`
 	IncludeIgnored bool   `json:"include_ignored"`
 }
 
 // Match describes one text match.
 type Match struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Text string `json:"text"`
+	Path   string   `json:"path"`
+	Line   int      `json:"line"`
+	Text   string   `json:"text"`
+	Before []string `json:"before,omitempty"`
+	After  []string `json:"after,omitempty"`
 }
 
 // SearchResponse is a bounded search result.
@@ -283,9 +290,13 @@ func (service *Service) Search(ctx context.Context, request SearchRequest) (Sear
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
 	}
+	matcher, err := newSearchMatcher(request)
+	if err != nil {
+		return SearchResponse{}, err
+	}
 	response := SearchResponse{Matches: make([]Match, 0, minInt(maxResults, 32))}
 	err = fs.WalkDir(service.filesystem, rootPath, func(path string, directoryEntry fs.DirEntry, walkErr error) error {
-		return service.searchEntry(ctx, path, directoryEntry, walkErr, request, maxResults, &response)
+		return service.searchEntry(ctx, path, directoryEntry, walkErr, request, matcher, maxResults, &response)
 	})
 	if errors.Is(err, errWalkLimit) {
 		return response, nil
@@ -296,7 +307,7 @@ func (service *Service) Search(ctx context.Context, request SearchRequest) (Sear
 	return response, nil
 }
 
-func (service *Service) searchEntry(ctx context.Context, path string, directoryEntry fs.DirEntry, walkErr error, request SearchRequest, maxResults int, response *SearchResponse) error {
+func (service *Service) searchEntry(ctx context.Context, path string, directoryEntry fs.DirEntry, walkErr error, request SearchRequest, matcher searchMatcher, maxResults int, response *SearchResponse) error {
 	if walkErr != nil {
 		return walkErr
 	}
@@ -316,13 +327,52 @@ func (service *Service) searchEntry(ctx context.Context, path string, directoryE
 	if err != nil {
 		return err
 	}
-	return appendSearchMatches(content, path, request.Query, maxResults, response)
+	return appendSearchMatches(content, path, matcher, maxResults, request.BeforeLines, request.AfterLines, response)
 }
 
-func appendSearchMatches(content, path, query string, maxResults int, response *SearchResponse) error {
-	for lineNumber, line := range strings.Split(content, "\n") {
-		if strings.Contains(line, query) {
-			response.Matches = append(response.Matches, Match{Path: filepath.ToSlash(path), Line: lineNumber + 1, Text: line})
+type searchMatcher struct {
+	query         string
+	caseSensitive bool
+	regularExpr   *regexp.Regexp
+}
+
+func newSearchMatcher(request SearchRequest) (searchMatcher, error) {
+	if request.BeforeLines < 0 || request.AfterLines < 0 {
+		return searchMatcher{}, apperr.New(apperr.KindUsage, "workspacefs.search", "context line counts must not be negative")
+	}
+	mode := request.Mode
+	if mode == "" {
+		mode = "literal"
+	}
+	if mode != "literal" && mode != "regex" {
+		return searchMatcher{}, apperr.New(apperr.KindUsage, "workspacefs.search", "mode must be literal or regex")
+	}
+	caseSensitive := true
+	if request.CaseSensitive != nil {
+		caseSensitive = *request.CaseSensitive
+	}
+	matcher := searchMatcher{query: request.Query, caseSensitive: caseSensitive}
+	if mode == "regex" {
+		pattern := request.Query
+		if !caseSensitive {
+			pattern = "(?i)" + pattern
+		}
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return searchMatcher{}, apperr.Wrap(apperr.KindUsage, "workspacefs.search", err)
+		}
+		matcher.regularExpr = compiled
+	}
+	return matcher, nil
+}
+
+func appendSearchMatches(content, path string, matcher searchMatcher, maxResults, beforeLines, afterLines int, response *SearchResponse) error {
+	lines := strings.Split(content, "\n")
+	for lineNumber, line := range lines {
+		if matcher.matches(line) {
+			beforeStart := maxInt(0, lineNumber-beforeLines)
+			afterEnd := minInt(len(lines), lineNumber+afterLines+1)
+			response.Matches = append(response.Matches, Match{Path: filepath.ToSlash(path), Line: lineNumber + 1, Text: line, Before: append([]string(nil), lines[beforeStart:lineNumber]...), After: append([]string(nil), lines[lineNumber+1:afterEnd]...)})
 		}
 		if len(response.Matches) >= maxResults {
 			response.Truncated = true
@@ -332,12 +382,35 @@ func appendSearchMatches(content, path, query string, maxResults int, response *
 	return nil
 }
 
+func (matcher searchMatcher) matches(line string) bool {
+	if matcher.regularExpr != nil {
+		return matcher.regularExpr.MatchString(line)
+	}
+	if matcher.caseSensitive {
+		return strings.Contains(line, matcher.query)
+	}
+	return strings.Contains(strings.ToLower(line), strings.ToLower(matcher.query))
+}
+
 func matchesGlob(pattern, path string) bool {
 	if pattern == "" {
 		return true
 	}
-	matched, err := filepath.Match(pattern, filepath.ToSlash(path))
-	return err == nil && matched
+	slashPath := filepath.ToSlash(path)
+	candidates := []string{slashPath}
+	if !strings.Contains(pattern, "/") {
+		candidates = append(candidates, filepath.Base(slashPath))
+	}
+	if strings.HasPrefix(pattern, "**/") {
+		candidates = append(candidates, strings.TrimPrefix(pattern, "**/"))
+	}
+	for _, candidate := range candidates {
+		matched, err := filepath.Match(pattern, candidate)
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 // HashRequest selects one workspace file.
@@ -394,10 +467,11 @@ type WriteRequest struct {
 
 // WriteResponse describes the written workspace file.
 type WriteResponse struct {
-	Path      string `json:"path"`
-	Bytes     int    `json:"bytes"`
-	Created   bool   `json:"created"`
-	Overwrote bool   `json:"overwrote"`
+	Path      string           `json:"path"`
+	Bytes     int              `json:"bytes"`
+	Created   bool             `json:"created"`
+	Overwrote bool             `json:"overwrote"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Write creates or explicitly overwrites one bounded workspace file.
@@ -422,6 +496,10 @@ func (service *Service) Write(ctx context.Context, request WriteRequest) (WriteR
 }
 
 func writeRootFile(root *os.Root, path string, content []byte, request WriteRequest) (WriteResponse, error) {
+	before, beforeExists, err := readRootSnapshot(root, path)
+	if err != nil {
+		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+	}
 	exists, err := prepareRootFile(root, path, request)
 	if err != nil {
 		return WriteResponse{}, err
@@ -435,7 +513,50 @@ func writeRootFile(root *os.Root, path string, content []byte, request WriteRequ
 	if err != nil {
 		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
 	}
-	return WriteResponse{Path: filepath.ToSlash(path), Bytes: written, Created: !exists, Overwrote: exists}, nil
+	changeSet, err := newChangeSet("fs.write", "applied", []string{filepath.ToSlash(path)}, before, beforeExists, content, true)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	return WriteResponse{Path: filepath.ToSlash(path), Bytes: written, Created: !exists, Overwrote: exists, ChangeSet: changeSet}, nil
+}
+
+func readRootSnapshot(root *os.Root, path string) ([]byte, bool, error) {
+	content, err := root.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return content, true, nil
+}
+
+func newChangeSet(operation, state string, paths []string, before []byte, beforeExists bool, after []byte, afterExists bool) (*tools.ChangeSet, error) {
+	beforeHashes := map[string]string{paths[0]: snapshotHash(before, beforeExists)}
+	afterHashes := map[string]string{paths[0]: snapshotHash(after, afterExists)}
+	return changeSetFromSnapshots(operation, state, paths, beforeHashes, afterHashes)
+}
+
+func changeSetFromSnapshots(operation, state string, paths []string, beforeHashes, afterHashes map[string]string) (*tools.ChangeSet, error) {
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: operation, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "workspacefs.change_set", err)
+	}
+	digest := sha256.Sum256(identity)
+	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: operation, State: state, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
+}
+
+func snapshotHash(content []byte, exists bool) string {
+	if !exists {
+		return ""
+	}
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 func prepareRootFile(root *os.Root, path string, request WriteRequest) (bool, error) {
@@ -486,8 +607,9 @@ type MoveRequest struct {
 
 // MoveResponse describes a moved workspace path.
 type MoveResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From      string           `json:"from"`
+	To        string           `json:"to"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Move moves a file or directory without replacing an existing destination.
@@ -513,10 +635,35 @@ func (service *Service) Move(ctx context.Context, request MoveRequest) (MoveResp
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
 	}
+	return moveRooted(root, from, to)
+}
+
+func moveRooted(root *os.Root, from, to string) (MoveResponse, error) {
+	beforeFrom, beforeFromExists, err := pathSnapshot(root, from)
+	if err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	beforeTo, beforeToExists, err := pathSnapshot(root, to)
+	if err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
 	if err := root.Rename(from, to); err != nil {
 		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
 	}
-	return MoveResponse{From: filepath.ToSlash(from), To: filepath.ToSlash(to)}, nil
+	afterFrom, afterFromExists, err := pathSnapshot(root, from)
+	if err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	afterTo, afterToExists, err := pathSnapshot(root, to)
+	if err != nil {
+		return MoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.move", err)
+	}
+	paths := []string{filepath.ToSlash(from), filepath.ToSlash(to)}
+	changeSet, err := changeSetFromSnapshots("fs.move", "applied", paths, map[string]string{paths[0]: snapshotHash(beforeFrom, beforeFromExists), paths[1]: snapshotHash(beforeTo, beforeToExists)}, map[string]string{paths[0]: snapshotHash(afterFrom, afterFromExists), paths[1]: snapshotHash(afterTo, afterToExists)})
+	if err != nil {
+		return MoveResponse{}, err
+	}
+	return MoveResponse{From: paths[0], To: paths[1], ChangeSet: changeSet}, nil
 }
 
 // MkdirRequest controls workspace directory creation.
@@ -527,7 +674,8 @@ type MkdirRequest struct {
 
 // MkdirResponse describes the created directory path.
 type MkdirResponse struct {
-	Path string `json:"path"`
+	Path      string           `json:"path"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Mkdir creates one workspace directory, optionally including parents.
@@ -544,6 +692,10 @@ func (service *Service) Mkdir(ctx context.Context, request MkdirRequest) (MkdirR
 		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
 	}
 	defer func() { _ = root.Close() }()
+	before, beforeExists, err := pathSnapshot(root, path)
+	if err != nil {
+		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
+	}
 	if request.Parents {
 		err = root.MkdirAll(path, 0700)
 	} else {
@@ -552,7 +704,16 @@ func (service *Service) Mkdir(ctx context.Context, request MkdirRequest) (MkdirR
 	if err != nil {
 		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
 	}
-	return MkdirResponse{Path: filepath.ToSlash(path)}, nil
+	after, afterExists, err := pathSnapshot(root, path)
+	if err != nil {
+		return MkdirResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.mkdir", err)
+	}
+	slashPath := filepath.ToSlash(path)
+	changeSet, err := changeSetFromSnapshots("fs.mkdir", "applied", []string{slashPath}, map[string]string{slashPath: snapshotHash(before, beforeExists)}, map[string]string{slashPath: snapshotHash(after, afterExists)})
+	if err != nil {
+		return MkdirResponse{}, err
+	}
+	return MkdirResponse{Path: slashPath, ChangeSet: changeSet}, nil
 }
 
 // RemoveRequest controls workspace file or directory removal.
@@ -563,8 +724,9 @@ type RemoveRequest struct {
 
 // RemoveResponse describes the removed workspace path.
 type RemoveResponse struct {
-	Path      string `json:"path"`
-	Recursive bool   `json:"recursive"`
+	Path      string           `json:"path"`
+	Recursive bool             `json:"recursive"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Remove removes one workspace path, recursively only when requested.
@@ -581,6 +743,10 @@ func (service *Service) Remove(ctx context.Context, request RemoveRequest) (Remo
 		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
 	}
 	defer func() { _ = root.Close() }()
+	before, beforeExists, err := pathSnapshot(root, path)
+	if err != nil {
+		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
+	}
 	if request.Recursive {
 		err = root.RemoveAll(path)
 	} else {
@@ -589,7 +755,16 @@ func (service *Service) Remove(ctx context.Context, request RemoveRequest) (Remo
 	if err != nil {
 		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
 	}
-	return RemoveResponse{Path: filepath.ToSlash(path), Recursive: request.Recursive}, nil
+	after, afterExists, err := pathSnapshot(root, path)
+	if err != nil {
+		return RemoveResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.remove", err)
+	}
+	slashPath := filepath.ToSlash(path)
+	changeSet, err := changeSetFromSnapshots("fs.remove", "applied", []string{slashPath}, map[string]string{slashPath: snapshotHash(before, beforeExists)}, map[string]string{slashPath: snapshotHash(after, afterExists)})
+	if err != nil {
+		return RemoveResponse{}, err
+	}
+	return RemoveResponse{Path: slashPath, Recursive: request.Recursive, ChangeSet: changeSet}, nil
 }
 
 // RegisterTools exposes the filesystem service through the normalized tool registry.
@@ -630,7 +805,7 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 			}
 			return service.Read(ctx, request)
 		}},
-		{name: "fs.search", description: "Search bounded workspace text.", parameters: `{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.search", description: "Search bounded workspace text with literal or regular-expression matching and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request SearchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -649,28 +824,28 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 
 func mutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: writeChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request WriteRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Write(ctx, request)
 		}},
-		{name: "fs.move", description: "Move one workspace file or directory without replacing an existing destination.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.move", description: "Move one workspace file or directory without replacing an existing destination.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: moveChangedPaths, changeSet: moveChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request MoveRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Move(ctx, request)
 		}},
-		{name: "fs.mkdir", description: "Create a workspace directory. Use parents=true for nested directory structures.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"parents":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.mkdir", description: "Create a workspace directory. Use parents=true for nested directory structures.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"parents":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request MkdirRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Mkdir(ctx, request)
 		}},
-		{name: "fs.remove", description: "Remove one workspace file or directory. Set recursive=true only when removing a directory tree is intended.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskDestructive, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.remove", description: "Remove one workspace file or directory. Set recursive=true only when removing a directory tree is intended.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskDestructive, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RemoveRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -681,11 +856,13 @@ func mutationAdapters(service *Service) []toolAdapter {
 }
 
 type toolAdapter struct {
-	name        string
-	description string
-	parameters  string
-	risk        tools.Risk
-	execute     func(context.Context, tools.Call) (any, error)
+	name         string
+	description  string
+	parameters   string
+	risk         tools.Risk
+	changedPaths func(any) []string
+	changeSet    func(any) *tools.ChangeSet
+	execute      func(context.Context, tools.Call) (any, error)
 }
 
 func (adapter toolAdapter) Definition() tools.Definition {
@@ -701,7 +878,82 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	if err != nil {
 		return tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Message: err.Error()}}}
 	}
-	return tools.Result{Status: tools.StatusSucceeded, Data: data}
+	result := tools.Result{Status: tools.StatusSucceeded, Data: data}
+	if adapter.changedPaths != nil {
+		result.ChangedPaths = adapter.changedPaths(data)
+	}
+	if adapter.changeSet != nil {
+		result.ChangeSet = adapter.changeSet(data)
+	}
+	return result
+}
+
+func singlePathChangedPaths(data any) []string {
+	response, ok := data.(interface{ changedPath() string })
+	if !ok || response.changedPath() == "" {
+		return nil
+	}
+	return []string{response.changedPath()}
+}
+
+func moveChangedPaths(data any) []string {
+	response, ok := data.(MoveResponse)
+	if !ok {
+		return nil
+	}
+	return []string{response.From, response.To}
+}
+
+func writeChangeSet(data any) *tools.ChangeSet {
+	response, ok := data.(WriteResponse)
+	if !ok {
+		return nil
+	}
+	return response.ChangeSet
+}
+
+func moveChangeSet(data any) *tools.ChangeSet {
+	response, ok := data.(MoveResponse)
+	if !ok {
+		return nil
+	}
+	return response.ChangeSet
+}
+
+type pathChangeSetResult interface {
+	changeSet() *tools.ChangeSet
+}
+
+func pathChangeSet(data any) *tools.ChangeSet {
+	response, ok := data.(pathChangeSetResult)
+	if !ok {
+		return nil
+	}
+	return response.changeSet()
+}
+
+func (response WriteResponse) changedPath() string          { return response.Path }
+func (response MkdirResponse) changedPath() string          { return response.Path }
+func (response RemoveResponse) changedPath() string         { return response.Path }
+func (response MkdirResponse) changeSet() *tools.ChangeSet  { return response.ChangeSet }
+func (response RemoveResponse) changeSet() *tools.ChangeSet { return response.ChangeSet }
+
+func pathSnapshot(root *os.Root, path string) ([]byte, bool, error) {
+	info, err := root.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if info.IsDir() {
+		return []byte("directory"), true, nil
+	}
+	content, err := root.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	return content, true, nil
 }
 
 func (service *Service) resolveExisting(path string) (relativePath string, absolutePath string, err error) {
@@ -829,6 +1081,13 @@ func normalizeFilesystemError(operation string, err error) error {
 
 func minInt(first, second int) int {
 	if first < second {
+		return first
+	}
+	return second
+}
+
+func maxInt(first, second int) int {
+	if first > second {
 		return first
 	}
 	return second

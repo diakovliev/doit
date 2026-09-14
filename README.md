@@ -105,11 +105,19 @@ Implemented command paths:
 | `doit` | Start the default agent request flow. |
 | `doit agent` | Run an agent request, reading a prompt from stdin when no prompt argument is supplied. |
 | `doit run <request>` | Run one development-oriented request and exit. |
+| `doit develop <request>` | Run a trusted workspace development request with local automation enabled. |
+| `doit review <request>` | Run a read-oriented review request without enabling workspace mutations. |
+| `doit test [task]` | Run a configured validation task directly, defaulting to `test`. |
+| `doit status` | Report the effective workspace, selected profiles, and Git state. |
+| `doit model test` | Send a minimal request to the selected backend and report normalized response metadata. |
+| `doit config list` | Print the effective non-secret configuration. |
+| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. |
+| `doit doctor` | Run local workspace, configuration, and profile diagnostics. |
 | `doit --help` | Print CLI usage. Put `--help` before the command. |
 | `doit --version` | Print the CLI version. |
 | `doit version` | Print the CLI version. |
 
-The following names are recognized for future workflow implementations: `develop`, `review`, `test`, `status`, `model`, `config`, `session`, and `doctor`. Use `run` for the current general-purpose workflow.
+Use `run` for a general-purpose request, `develop` for trusted workspace automation, and `review` for read-oriented analysis. The local diagnostic commands do not create model sessions unless explicitly documented above.
 
 Initialize a workspace before adding project-specific guidance:
 
@@ -199,6 +207,8 @@ DOIT_API_ROOT
 DOIT_API_KEY_ENV
 DOIT_EPHEMERAL
 ```
+
+The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
 
 Configuration precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, and command-line flags.
 
@@ -309,8 +319,10 @@ Git inspection and local operations:
 - `git.unstage`
 - `git.commit`
 - `git.restore`
+- `git.branch`
+- `git.worktree`
 
-Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. Agent mode asks for approval; `doit run` can automate these local operations. Remote operations and arbitrary Git command composition are not exposed.
+Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
 
 Code and validation:
 
@@ -337,7 +349,7 @@ The model-facing schema advertises the tasks available in the current workspace.
 
 The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
-Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is the automation path: it allows local workspace changes and configured process tasks without prompting, while tool-level path confinement, network rejection, and command allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
+Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is trusted workspace automation: configured operations inside the effective workspace, including destructive local changes, run without prompting. The resulting diff, change request, validation output, and session evidence are the human review surface; workspace boundaries, symlink checks, and configured capability allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
 
 Example approval flow:
 

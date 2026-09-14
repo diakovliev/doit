@@ -168,7 +168,7 @@ func validateCommand(invocation *Invocation) error {
 		if len(invocation.Arguments) > 0 {
 			return usageError("agent does not accept positional arguments")
 		}
-	case "run":
+	case "run", "develop", "review":
 		if len(invocation.Arguments) > 0 {
 			invocation.Request = strings.Join(invocation.Arguments, " ")
 		}
@@ -180,7 +180,7 @@ func validateCommand(invocation *Invocation) error {
 		if len(invocation.Arguments) > 0 {
 			return usageError(invocation.Command + " does not accept arguments")
 		}
-	case "develop", "review", "test", "status", "model", "config", "session", "doctor":
+	case "test", "status", "model", "config", "session", "doctor":
 		// These commands are reserved by the design and will be wired by later tasks.
 	default:
 		return usageError("unknown command: " + invocation.Command)

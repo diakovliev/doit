@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/diakovliev/doit/internal/tools"
 	"github.com/diakovliev/doit/internal/usage"
 )
 
@@ -46,19 +47,25 @@ type Event struct {
 
 // Validation records one configured validation task.
 type Validation struct {
-	Task        string        `json:"task"`
-	ExitCode    int           `json:"exit_code"`
-	Duration    time.Duration `json:"duration"`
-	Diagnostics string        `json:"diagnostics,omitempty"`
+	Task             string        `json:"task"`
+	Kind             string        `json:"kind,omitempty"`
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Passed           bool          `json:"passed"`
+	ExitCode         int           `json:"exit_code"`
+	Duration         time.Duration `json:"duration"`
+	TimedOut         bool          `json:"timed_out"`
+	Truncated        bool          `json:"truncated"`
+	Diagnostics      string        `json:"diagnostics,omitempty"`
 }
 
 // Result is the final redacted session summary.
 type Result struct {
-	Summary      string       `json:"summary"`
-	ChangedPaths []string     `json:"changed_paths,omitempty"`
-	Validations  []Validation `json:"validations,omitempty"`
-	Unresolved   []string     `json:"unresolved,omitempty"`
-	Usage        usage.Counts `json:"usage"`
+	Summary      string            `json:"summary"`
+	ChangedPaths []string          `json:"changed_paths,omitempty"`
+	ChangeSets   []tools.ChangeSet `json:"change_sets,omitempty"`
+	Validations  []Validation      `json:"validations,omitempty"`
+	Unresolved   []string          `json:"unresolved,omitempty"`
+	Usage        usage.Counts      `json:"usage"`
 }
 
 // Record contains the metadata, events, and optional completion result.
