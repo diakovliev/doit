@@ -532,12 +532,18 @@ func readRootSnapshot(root *os.Root, path string) ([]byte, bool, error) {
 }
 
 func newChangeSet(operation, state string, paths []string, before []byte, beforeExists bool, after []byte, afterExists bool) (*tools.ChangeSet, error) {
+	if len(paths) != 1 {
+		return nil, apperr.New(apperr.KindTool, "workspacefs.change_set", "internal error: expected exactly one path")
+	}
 	beforeHashes := map[string]string{paths[0]: snapshotHash(before, beforeExists)}
 	afterHashes := map[string]string{paths[0]: snapshotHash(after, afterExists)}
 	return changeSetFromSnapshots(operation, state, paths, beforeHashes, afterHashes)
 }
 
 func changeSetFromSnapshots(operation, state string, paths []string, beforeHashes, afterHashes map[string]string) (*tools.ChangeSet, error) {
+	if len(paths) == 0 {
+		return nil, apperr.New(apperr.KindTool, "workspacefs.change_set", "internal error: at least one path is required")
+	}
 	identity, err := json.Marshal(struct {
 		Operation    string            `json:"operation"`
 		Paths        []string          `json:"paths"`
@@ -784,7 +790,7 @@ func registerToolAdapters(registry *tools.Registry, definitions []toolAdapter) e
 
 func readOnlyAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.list", description: "List bounded workspace entries.", parameters: `{"type":"object","properties":{}}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.list", description: "List bounded workspace entries below an optional workspace-relative path.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"},"max_entries":{"type":"integer","minimum":1},"max_depth":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}}}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ListRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -805,7 +811,7 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 			}
 			return service.Read(ctx, request)
 		}},
-		{name: "fs.search", description: "Search bounded workspace text with literal or regular-expression matching and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.search", description: "Search bounded workspace text below an optional workspace-relative path, with an optional glob, literal or regular-expression matching, and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request SearchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
