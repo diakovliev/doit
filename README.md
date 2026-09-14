@@ -290,7 +290,7 @@ If the endpoint rejects a request, inspect the provider response and verify:
 
 ## Console Output
 
-Human mode emits safe progress events before the final result:
+Human mode emits one replaceable `[doit] <current action>` status line while attached to an interactive terminal. Captured output and CI streams keep newline-delimited progress events for diagnostics:
 
 ```text
 [doit] session: session started
@@ -304,7 +304,7 @@ Finished repository inspection.
 session=... input_tokens=... output_tokens=... total_tokens=... source=provider exact=true
 ```
 
-Progress messages do not include credentials, prompts, or raw tool arguments. JSON output (`--format json`) is intended for automation and writes the final result object without human progress lines.
+Progress messages do not include credentials, prompts, or raw tool arguments. JSON output (`--format json`) is intended for automation and writes the final result object without progress lines.
 
 ## Tools
 

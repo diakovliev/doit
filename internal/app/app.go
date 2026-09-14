@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,12 +67,9 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
-	progress := func(event agent.ProgressEvent) {
-		if configuration.Format == "json" {
-			return
-		}
-		_, _ = fmt.Fprintf(stdout, "[doit] %s: %s\n", event.Phase, event.Message)
-	}
+	progressLine := newProgressLine(stdout, configuration.Format != "json")
+	defer progressLine.Close()
+	progress := progressLine.Update
 	dependencies, err := buildRuntime(configuration, progress)
 	if err != nil {
 		return err
@@ -79,6 +77,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	defer dependencies.close()
 	if invocation.Command == "agent" && configuration.Format != "json" {
 		dependencies.runner.Approve = func(approvalContext context.Context, action policy.Action, call tools.Call) (bool, error) {
+			progressLine.Clear()
 			return promptApproval(approvalContext, input, stdout, action, call)
 		}
 	}
@@ -86,7 +85,60 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
+	progressLine.Clear()
 	return writeOutcome(stdout, configuration.Format, outcome)
+}
+
+type progressLine struct {
+	writer  io.Writer
+	enabled bool
+	replace bool
+	width   int
+}
+
+func newProgressLine(writer io.Writer, enabled bool) *progressLine {
+	return &progressLine{writer: writer, enabled: enabled, replace: enabled && isTerminalWriter(writer)}
+}
+
+func (line *progressLine) Update(event agent.ProgressEvent) {
+	if !line.enabled {
+		return
+	}
+	if !line.replace {
+		_, _ = fmt.Fprintf(line.writer, "[doit] %s: %s\n", event.Phase, event.Message)
+		return
+	}
+	line.clearTerminalText()
+	text := fmt.Sprintf("[doit] %s: %s", event.Phase, event.Message)
+	_, _ = fmt.Fprint(line.writer, text)
+	line.width = len(text)
+}
+
+func (line *progressLine) Clear() {
+	if line.replace {
+		line.clearTerminalText()
+	}
+}
+
+func (line *progressLine) Close() {
+	line.Clear()
+}
+
+func (line *progressLine) clearTerminalText() {
+	if line.width == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(line.writer, "\r%s\r", strings.Repeat(" ", line.width))
+	line.width = 0
+}
+
+func isTerminalWriter(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func runLocalCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) (bool, error) {
