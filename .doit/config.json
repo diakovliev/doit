@@ -13,6 +13,7 @@
       "api_root": "https://daemondeveloperfoundry.services.ai.azure.com/openai/v1",
       "model": "DeepSeek-V4-Flash",
       "api_key_env": "DOIT_FOUNDRY_API_KEY",
+      "streaming": true,
       "rate_limit": {
         "tokens_per_minute": 20000,
         "requests_per_minute": 20
