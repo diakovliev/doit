@@ -45,6 +45,22 @@ func TestParseNoResumeAliasStartsFreshSession(t *testing.T) {
 	}
 }
 
+func TestParseInit(t *testing.T) {
+	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "init"})
+	if err != nil {
+		t.Fatalf("parse init invocation: %v", err)
+	}
+	if invocation.Command != "init" || invocation.Directory != "workspace" || invocation.Format != "json" {
+		t.Fatalf("unexpected init invocation: %+v", invocation)
+	}
+}
+
+func TestParseInitRejectsArguments(t *testing.T) {
+	if _, err := Parse([]string{"init", "extra"}); err == nil {
+		t.Fatal("expected init arguments to fail")
+	}
+}
+
 func TestParseNoCommandUsesAgent(t *testing.T) {
 	invocation, err := Parse(nil)
 	if err != nil {
