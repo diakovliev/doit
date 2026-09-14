@@ -56,6 +56,20 @@ func TestRunnerAutomaticallyResumesLatestWorkspaceSession(t *testing.T) {
 	}
 }
 
+func TestRunnerResumesExplicitSessionID(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, false)
+	defer func() { _ = store.Close() }()
+	first, err := runner.Run(context.Background(), Task{Command: "run", Request: "first request", Workspace: root, Model: "test-model", NewSession: true})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second, err := runner.Run(context.Background(), Task{Command: "run", Request: "resume request", Workspace: root, Model: "test-model", SessionID: string(first.SessionID)})
+	if err != nil || second.SessionID != first.SessionID {
+		t.Fatalf("explicit resume failed: first=%q second=%q error=%v", first.SessionID, second.SessionID, err)
+	}
+}
+
 func TestResumeHistoryDropsOrphanedAndIncompleteToolItems(t *testing.T) {
 	request := model.Request{Input: []model.InputItem{
 		{Type: "function_call_output", CallID: "orphan", Output: "{}"},

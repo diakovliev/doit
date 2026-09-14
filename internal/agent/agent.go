@@ -49,6 +49,7 @@ type Task struct {
 	NonInteractive      bool
 	WorkspaceAutomation bool
 	NewSession          bool
+	SessionID           string
 }
 
 // Outcome is the final normalized task result.
@@ -78,7 +79,7 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 	if err := runner.validate(); err != nil {
 		return Outcome{}, err
 	}
-	metadata := session.Metadata{InvocationPath: task.Workspace, Command: task.Command, Profile: task.Profile, Model: task.Model}
+	metadata := session.Metadata{ID: session.ID(task.SessionID), InvocationPath: task.Workspace, Command: task.Command, Profile: task.Profile, Model: task.Model}
 	sessionID, resumed, err := runner.openSession(ctx, metadata, task.NewSession)
 	if err != nil {
 		return Outcome{}, err
@@ -106,6 +107,10 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 }
 
 func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata, newSession bool) (session.ID, bool, error) {
+	if metadata.ID != "" {
+		resumedID, err := runner.Sessions.Resume(ctx, metadata.ID, metadata)
+		return resumedID, true, err
+	}
 	if !newSession {
 		latestID, found, err := runner.Sessions.Latest(ctx)
 		if err != nil {
