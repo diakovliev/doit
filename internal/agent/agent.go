@@ -11,6 +11,7 @@ import (
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
 	"github.com/diakovliev/doit/internal/model"
 	"github.com/diakovliev/doit/internal/policy"
+	"github.com/diakovliev/doit/internal/process"
 	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
 	"github.com/diakovliev/doit/internal/usage"
@@ -56,6 +57,8 @@ type Outcome struct {
 	Text         string
 	Usage        usage.Counts
 	ChangedPaths []string
+	ChangeSets   []tools.ChangeSet
+	Validations  []session.Validation
 }
 
 // Runner coordinates one task.
@@ -120,6 +123,8 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
 	totalUsage := initialUsage
 	changedPaths := make([]string, 0)
+	changeSets := make([]tools.ChangeSet, 0)
+	validations := make([]session.Validation, 0)
 	maxRounds := runner.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = defaultMaxRounds
@@ -130,7 +135,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 		if createErr != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, createErr)
 		}
-		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, changedPaths, round == 0, initialUsage)
+		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, changedPaths, changeSets, validations, round == 0, initialUsage)
 		if err != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, err
 		}
@@ -138,7 +143,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 			runner.emit(ProgressEvent{Phase: "session", Message: "task completed"})
 			return outcome, nil
 		}
-		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, &changedPaths, nonInteractive, workspaceAutomation); err != nil {
+		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, &changedPaths, &changeSets, &validations, nonInteractive, workspaceAutomation); err != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 		}
 	}
@@ -146,7 +151,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 }
 
-func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
+func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
 	*totalUsage = addResponseUsage(*totalUsage, response.Usage, first, initialUsage)
 	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("model response received (%d tool call(s))", len(response.ToolCalls))})
 	if err := runner.appendEvent(ctx, sessionID, "model_message", response); err != nil {
@@ -159,7 +164,7 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 	if len(response.ToolCalls) > 0 {
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, nil
 	}
-	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, ChangedPaths: append([]string(nil), changedPaths...)}
+	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
 	if err := runner.completeSession(ctx, sessionID, outcome); err != nil {
 		return outcome, false, err
 	}
@@ -321,50 +326,83 @@ func sanitizeHistory(history []model.InputItem) []model.InputItem {
 	return result
 }
 
-func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, changedPaths *[]string, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	for _, call := range calls {
-		tool, exists := runner.Tools.Lookup(call.Name)
-		if !exists {
-			return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
-		}
-		runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
-		definition := tool.Definition()
-		action := policy.Action{Name: definition.Name, Risk: definition.Risk, NonInteractive: nonInteractive, WorkspaceAutomation: workspaceAutomation}
-		decision := runner.Policy.Decide(ctx, action)
-		if decision == policy.DecisionConfirm {
-			if runner.Approve == nil {
-				decision = policy.DecisionDeny
-			} else {
-				approved, err := runner.Approve(ctx, action, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
-				if err != nil {
-					return err
-				}
-				if approved {
-					decision = policy.DecisionAllow
-				} else {
-					decision = policy.DecisionDeny
-				}
-			}
-		}
-		toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
-		if decision == policy.DecisionAllow {
-			toolResult = tool.Execute(ctx, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
-			*changedPaths = appendUniquePaths(*changedPaths, toolResult.ChangedPaths)
-		}
-		if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
+		if err := runner.handleToolCall(ctx, sessionID, request, call, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation); err != nil {
 			return err
 		}
-		runner.emit(ProgressEvent{Phase: "tool", Message: "tool " + string(toolResult.Status) + ": " + call.Name, Tool: call.Name})
-		encodedResult, err := json.Marshal(toolResult)
-		if err != nil {
-			return err
-		}
-		request.Input = append(request.Input,
-			model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments},
-			model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult)},
-		)
 	}
 	return nil
+}
+
+func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+	tool, exists := runner.Tools.Lookup(call.Name)
+	if !exists {
+		return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
+	}
+	runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
+	decision, err := runner.toolDecision(ctx, tool.Definition(), call, nonInteractive, workspaceAutomation)
+	if err != nil {
+		return err
+	}
+	toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
+	if decision == policy.DecisionAllow {
+		toolResult = tool.Execute(ctx, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+		if toolResult.ChangeSet != nil {
+			toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
+		}
+		*changedPaths = appendUniquePaths(*changedPaths, toolResult.ChangedPaths)
+		if toolResult.ChangeSet != nil {
+			*changeSets = appendUniqueChangeSets(*changeSets, *toolResult.ChangeSet)
+		}
+		if call.Name == "process.run" {
+			if validation, ok := validationFromResult(toolResult.Data); ok {
+				*validations = append(*validations, validation)
+			}
+		}
+	}
+	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
+		return err
+	}
+	runner.emit(ProgressEvent{Phase: "tool", Message: "tool " + string(toolResult.Status) + ": " + call.Name, Tool: call.Name})
+	encodedResult, err := json.Marshal(toolResult)
+	if err != nil {
+		return err
+	}
+	request.Input = append(request.Input,
+		model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments},
+		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult)},
+	)
+	return nil
+}
+
+func approvalIdentity(workspaceAutomation, nonInteractive bool) string {
+	if workspaceAutomation {
+		return "workspace-automation"
+	}
+	if !nonInteractive {
+		return "interactive-approval"
+	}
+	return "policy-allow"
+}
+
+func (runner *Runner) toolDecision(ctx context.Context, definition tools.Definition, call model.ToolCall, nonInteractive bool, workspaceAutomation bool) (policy.Decision, error) {
+	action := policy.Action{Name: definition.Name, Risk: definition.Risk, NonInteractive: nonInteractive, WorkspaceAutomation: workspaceAutomation}
+	decision := runner.Policy.Decide(ctx, action)
+	if decision != policy.DecisionConfirm || runner.Approve == nil {
+		if decision == policy.DecisionConfirm {
+			return policy.DecisionDeny, nil
+		}
+		return decision, nil
+	}
+	approved, err := runner.Approve(ctx, action, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+	if err != nil {
+		return policy.DecisionDeny, err
+	}
+	if approved {
+		return policy.DecisionAllow, nil
+	}
+	return policy.DecisionDeny, nil
 }
 
 func appendUniquePaths(existing, additions []string) []string {
@@ -385,6 +423,36 @@ func appendUniquePaths(existing, additions []string) []string {
 	return existing
 }
 
+func appendUniqueChangeSets(existing []tools.ChangeSet, additions ...tools.ChangeSet) []tools.ChangeSet {
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	for _, changeSet := range existing {
+		seen[changeSet.ID] = struct{}{}
+	}
+	for _, changeSet := range additions {
+		if changeSet.ID == "" {
+			continue
+		}
+		if _, exists := seen[changeSet.ID]; exists {
+			continue
+		}
+		seen[changeSet.ID] = struct{}{}
+		existing = append(existing, changeSet)
+	}
+	return existing
+}
+
+func validationFromResult(data any) (session.Validation, bool) {
+	result, ok := data.(process.Result)
+	if !ok {
+		return session.Validation{}, false
+	}
+	diagnostics, err := json.Marshal(result.Diagnostics)
+	if err != nil {
+		diagnostics = nil
+	}
+	return session.Validation{Task: result.Task, Kind: result.Kind, WorkingDirectory: result.WorkingDirectory, Passed: result.Passed, ExitCode: result.ExitCode, Duration: result.Duration, TimedOut: result.TimedOut, Truncated: result.Truncated, Diagnostics: string(diagnostics)}, true
+}
+
 func (runner *Runner) emit(event ProgressEvent) {
 	if runner.Progress != nil {
 		runner.Progress(event)
@@ -400,7 +468,7 @@ func (runner *Runner) appendEvent(ctx context.Context, id session.ID, eventType 
 }
 
 func (runner *Runner) completeSession(ctx context.Context, id session.ID, outcome Outcome) error {
-	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, Usage: outcome.Usage})
+	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, ChangeSets: outcome.ChangeSets, Validations: outcome.Validations, Usage: outcome.Usage})
 }
 
 func (runner *Runner) failSession(ctx context.Context, id session.ID, err error) error {
