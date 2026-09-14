@@ -16,7 +16,7 @@ import (
 
 func TestRunnerExecutesAllowlistedTask(t *testing.T) {
 	runner := newTestRunner(t)
-	result, err := runner.Run(context.Background(), process.Task{Name: "echo", Arguments: []string{"hello"}})
+	result, err := runner.Run(context.Background(), process.Task{Name: "echo", Arguments: []string{"hello"}, WorkingDirectory: "."})
 	if err != nil {
 		t.Fatalf("run task: %v", err)
 	}
@@ -76,6 +76,21 @@ func TestWorkingDirectoryRejectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := runner.workingDirectory("linked"); err == nil {
 		t.Fatal("expected symlinked working directory to be rejected")
+	}
+}
+
+func TestWorkingDirectoryAcceptsWorkspaceRoot(t *testing.T) {
+	workspace := t.TempDir()
+	runner, err := New(workspace, 1024)
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	workingDirectory, err := runner.workingDirectory(".")
+	if err != nil {
+		t.Fatalf("workspace root was rejected: %v", err)
+	}
+	if workingDirectory != workspace {
+		t.Fatalf("unexpected working directory: %q", workingDirectory)
 	}
 }
 

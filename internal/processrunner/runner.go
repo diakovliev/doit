@@ -185,6 +185,17 @@ func (runner *Runner) validateWorkingDirectory(candidate string) (string, error)
 	if err != nil {
 		return "", apperr.Wrap(apperr.KindTool, "processrunner.run", err)
 	}
+	info, statErr := os.Stat(candidate)
+	if statErr == nil {
+		resolvedCandidate, resolveErr := filepath.EvalSymlinks(candidate)
+		if resolveErr != nil || !info.IsDir() || !withinRoot(realRoot, resolvedCandidate) {
+			return "", symlinkEscapeError()
+		}
+		return candidate, nil
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
+		return "", apperr.Wrap(apperr.KindTool, "processrunner.run", statErr)
+	}
 	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(candidate))
 	if err != nil {
 		return "", apperr.Wrap(apperr.KindPolicy, "processrunner.run", err)
@@ -192,15 +203,7 @@ func (runner *Runner) validateWorkingDirectory(candidate string) (string, error)
 	if !withinRoot(realRoot, resolvedParent) {
 		return "", symlinkEscapeError()
 	}
-	info, statErr := os.Stat(candidate)
-	if statErr != nil {
-		return "", apperr.Wrap(apperr.KindTool, "processrunner.run", statErr)
-	}
-	resolvedCandidate, resolveErr := filepath.EvalSymlinks(candidate)
-	if resolveErr != nil || !info.IsDir() || !withinRoot(realRoot, resolvedCandidate) {
-		return "", symlinkEscapeError()
-	}
-	return candidate, nil
+	return "", apperr.Wrap(apperr.KindTool, "processrunner.run", statErr)
 }
 
 func symlinkEscapeError() error {
