@@ -47,6 +47,7 @@ type Task struct {
 	Model               string
 	MaxInputTokens      int
 	MaxOutputTokens     int
+	MaxSessionTokens    int
 	NonInteractive      bool
 	WorkspaceAutomation bool
 	NewSession          bool
@@ -105,7 +106,7 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 		return Outcome{SessionID: sessionID}, err
 	}
 	runner.emit(ProgressEvent{Phase: "context", Message: "bounded context prepared"})
-	return runner.loop(ctx, sessionID, request, initialUsage, task.NonInteractive, task.WorkspaceAutomation)
+	return runner.loop(ctx, sessionID, request, initialUsage, task.MaxInputTokens, task.MaxSessionTokens, task.NonInteractive, task.WorkspaceAutomation)
 }
 
 func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata, newSession bool) (session.ID, bool, error) {
@@ -127,20 +128,20 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 	return startedID, false, err
 }
 
-func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
+func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
 	totalUsage := initialUsage
 	changedPaths := make([]string, 0)
 	changeSets := make([]tools.ChangeSet, 0)
 	validations := make([]session.Validation, 0)
+	budgetNotified := false
 	maxRounds := runner.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = defaultMaxRounds
 	}
 	for round := range maxRounds {
-		runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("requesting model response (round %d)", round+1), Round: round + 1})
-		response, createErr := runner.createResponse(ctx, request)
-		if createErr != nil {
-			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, createErr)
+		response, requestErr := runner.requestRound(ctx, &request, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round)
+		if requestErr != nil {
+			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSessionWithUsage(ctx, sessionID, requestErr, totalUsage)
 		}
 		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, changedPaths, changeSets, validations, round == 0, initialUsage)
 		if err != nil {
@@ -156,6 +157,18 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 	}
 	err := apperr.New(apperr.KindTool, "agent.run", "maximum model/tool rounds exceeded")
 	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
+}
+
+func (runner *Runner) requestRound(ctx context.Context, request *model.Request, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int) (model.Response, error) {
+	if _, fitErr := runner.Context.FitRequest(ctx, request, maxInputTokens); fitErr != nil {
+		return model.Response{}, fitErr
+	}
+	if maxSessionTokens > 0 && usedSessionTokens >= int64(maxSessionTokens) && !*budgetNotified {
+		runner.emit(ProgressEvent{Phase: "session", Message: "session usage threshold reached; continuing with bounded context and session.history"})
+		*budgetNotified = true
+	}
+	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("requesting model response (round %d)", round+1), Round: round + 1})
+	return runner.createResponse(ctx, *request)
 }
 
 func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
@@ -376,7 +389,8 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 	}
 	toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
 	if decision == policy.DecisionAllow {
-		toolResult = tool.Execute(ctx, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+		toolContext := session.WithActiveID(ctx, sessionID)
+		toolResult = tool.Execute(toolContext, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
 		if toolResult.ChangeSet != nil {
 			toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
 		}
@@ -501,11 +515,22 @@ func (runner *Runner) completeSession(ctx context.Context, id session.ID, outcom
 }
 
 func (runner *Runner) failSession(ctx context.Context, id session.ID, err error) error {
-	completeErr := runner.Sessions.Complete(ctx, id, session.Result{Summary: err.Error(), Unresolved: []string{err.Error()}})
+	return runner.failSessionWithUsage(ctx, id, err, usage.Counts{})
+}
+
+func (runner *Runner) failSessionWithUsage(ctx context.Context, id session.ID, err error, tokenUsage usage.Counts) error {
+	completeErr := runner.Sessions.Complete(ctx, id, session.Result{Summary: err.Error(), Unresolved: []string{err.Error()}, Usage: tokenUsage})
 	if completeErr != nil {
 		return fmt.Errorf("%w; completing session: %w", err, completeErr)
 	}
 	return err
+}
+
+func usageValue(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func addResponseUsage(total, response usage.Counts, first bool, initial usage.Counts) usage.Counts {

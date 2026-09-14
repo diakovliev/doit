@@ -176,6 +176,27 @@ When session history is trimmed to fit the input budget, function-call and funct
 
 Repository guidance discovery is an explicit allowlist. It reads `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
 
+#### Session Context and History Retrieval
+
+Session context uses three independent bounds:
+
+- `max_input_tokens` limits the serialized context of one model request, including instructions, tools, retained history, current input, and tool results. The context builder must fit this budget before every request and remove function-call/function-call-output pairs atomically.
+- `max_session_tokens` sets a cumulative model-usage threshold for the session. It includes finalized input and output usage for every model round, including follow-up rounds after tool calls. Reaching the threshold emits a session diagnostic and keeps the model informed that context is bounded; it does not terminate an otherwise valid tool loop. The hard execution bounds remain the per-request input budget, maximum round count, caller deadline, tool limits, and cancellation.
+- Session transcript limits bound durable event size and model-visible history results. A bounded event is not permission to return an unbounded collection of events.
+
+The default request context contains a recent coherent history window. Older history is available through a dedicated read-only model tool named `session.history`; it must not be exposed through `fs.read` or by allowing the model to read `.doit/sessions/` directly.
+
+`session.history` is scoped to the active session established by the orchestrator. The model may provide:
+
+- An optional text `query` for bounded search over redacted public event content.
+- Optional `event_types` such as `request`, `model_message`, `tool_result`, `validation`, or `lifecycle`.
+- Optional `after_sequence` and `before_sequence` cursors.
+- `max_events` and `max_bytes` limits subject to server-side maxima.
+
+The result contains event sequence, type, timestamp, bounded public content, and a truncation or continuation cursor. It never accepts an arbitrary session ID and never returns continuation state, hidden reasoning, credentials, environment values, unredacted file contents, or events from another workspace. Every history result is counted as input on the next model request.
+
+The history tool is a retrieval escape hatch, not an instruction to inject the complete transcript into every request. Automatic resume should keep recent coherent turns, while an older decision, validation failure, or tool result is retrieved only when the model asks for it. Remote bridge or Copilot sessions must bind the active session to the authenticated workspace lease before exposing this tool.
+
 ### 4.4 Model Client Adapter
 
 The model layer exposes a provider-neutral interface to the orchestrator. The first adapter should be a direct HTTP adapter for backends that implement the OpenAI Responses API contract. The hosting location and provider name are configuration data, not compile-time dependencies.
@@ -242,6 +263,8 @@ The accounting sequence is:
 3. Increment output counters from streamed deltas when streaming is enabled, without counting the same delta twice.
 4. Reconcile the final counters with the provider's `usage` object when one is returned. Provider values replace estimates for that request.
 5. Add the finalized request counters to the cumulative session counters and write them to the session result.
+
+The cumulative session counter is an accounting and warning threshold, not the same thing as the per-request context window. A session can have a small request context and cross its cumulative usage threshold after many tool rounds while continuing under the hard round and deadline limits. Conversely, a large durable transcript does not automatically become model context; it is accessed only through bounded retrieval.
 
 The adapter should preserve provider details when available, including cached input tokens and reasoning output tokens. Tool results are not output tokens; they become input on the next model request. Retries are separate model attempts and must not be silently collapsed into one usage record.
 
@@ -417,6 +440,8 @@ Each durable session contains:
 - `result.json`: Required after completion or cancellation. It contains the final summary, changed-file paths, validation results, unresolved issues, and cumulative token counters with their source and exactness.
 - `continuation.json`: Required only when the selected backend needs opaque provider state to resume a session, such as a response identifier or encrypted continuation item. It must never be printed as normal output.
 - `artifacts/`: Optional user-visible artifacts such as an approved patch, exported report, or diagnostic bundle. Full file snapshots and raw model payloads are not stored here by default.
+
+Session retrieval is a separate contract from session persistence. The store may load a record for CLI inspection and may provide a bounded history query for `session.history`, but the model-facing query must never expose raw session files or opaque continuation data.
 
 Session events must be redacted and bounded before they are written. Durable data must never contain:
 

@@ -45,6 +45,31 @@ type Event struct {
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 
+// HistoryQuery selects a bounded view of the active session's public events.
+type HistoryQuery struct {
+	Query          string   `json:"query,omitempty"`
+	EventTypes     []string `json:"event_types,omitempty"`
+	AfterSequence  uint64   `json:"after_sequence,omitempty"`
+	BeforeSequence uint64   `json:"before_sequence,omitempty"`
+	MaxEvents      int      `json:"max_events,omitempty"`
+	MaxBytes       int      `json:"max_bytes,omitempty"`
+}
+
+// HistoryEvent is the bounded public representation returned to a model.
+type HistoryEvent struct {
+	Sequence  uint64          `json:"sequence"`
+	Timestamp time.Time       `json:"timestamp"`
+	Type      string          `json:"type"`
+	Data      json.RawMessage `json:"data,omitempty"`
+}
+
+// HistoryResult contains a bounded session-history page.
+type HistoryResult struct {
+	Events            []HistoryEvent `json:"events"`
+	Truncated         bool           `json:"truncated"`
+	NextAfterSequence uint64         `json:"next_after_sequence,omitempty"`
+}
+
 // Validation records one configured validation task.
 type Validation struct {
 	Task             string        `json:"task"`
@@ -85,4 +110,18 @@ type Store interface {
 	Complete(context.Context, ID, Result) error
 	WriteContinuation(context.Context, ID, json.RawMessage) error
 	Load(context.Context, ID) (Record, error)
+	History(context.Context, ID, HistoryQuery) (HistoryResult, error)
+}
+
+type activeSessionIDKey struct{}
+
+// WithActiveID binds a session ID to a tool execution context.
+func WithActiveID(ctx context.Context, id ID) context.Context {
+	return context.WithValue(ctx, activeSessionIDKey{}, id)
+}
+
+// ActiveID returns the session ID bound to a tool execution context.
+func ActiveID(ctx context.Context) (ID, bool) {
+	id, ok := ctx.Value(activeSessionIDKey{}).(ID)
+	return id, ok && id != ""
 }

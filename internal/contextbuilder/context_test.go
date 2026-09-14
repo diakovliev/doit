@@ -87,6 +87,27 @@ func TestBuilderTrimsFunctionCallsWithTheirOutputs(t *testing.T) {
 	}
 }
 
+func TestBuilderExplainsBoundedSessionHistory(t *testing.T) {
+	root := t.TempDir()
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{})
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{
+		Model:          "test-model",
+		UserInput:      "continue the task",
+		Tools:          []model.ToolDefinition{{Type: "function", Name: "session.history"}},
+		MaxInputTokens: 1000,
+	})
+	if err != nil {
+		t.Fatalf("build session history context: %v", err)
+	}
+	if !strings.Contains(request.Instructions, "session.history") || !strings.Contains(request.Instructions, "Do not assume omitted history") {
+		t.Fatalf("bounded history guidance was not included: %s", request.Instructions)
+	}
+}
+
 type itemCountCounter struct{}
 
 func (itemCountCounter) Count(_ stdcontext.Context, content []byte) (int64, error) {

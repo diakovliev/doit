@@ -83,6 +83,24 @@ func TestRunnerFallsBackWhenStreamingFails(t *testing.T) {
 	}
 }
 
+func TestRunnerContinuesAfterSessionUsageThreshold(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	client := runner.Client.(*sequenceClient)
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "budget", Workspace: root, Model: "test-model", MaxSessionTokens: 1, NewSession: true})
+	if err != nil || outcome.Text != "finished" {
+		t.Fatalf("expected bounded session to complete after threshold: outcome=%+v error=%v", outcome, err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected model/tool loop to continue after threshold: %d request(s)", len(client.requests))
+	}
+	record, loadErr := store.Load(context.Background(), outcome.SessionID)
+	if loadErr != nil || record.Result == nil || record.Result.Summary != "finished" {
+		t.Fatalf("completed result was not persisted: record=%+v error=%v", record, loadErr)
+	}
+}
+
 func (client *sequenceClient) Create(_ context.Context, request model.Request) (model.Response, error) {
 	client.requests = append(client.requests, request)
 	response := client.responses[client.index]

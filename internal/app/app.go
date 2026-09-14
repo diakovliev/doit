@@ -82,7 +82,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 			return promptApproval(approvalContext, input, stdout, action, call)
 		}
 	}
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
 	if err != nil {
 		return err
 	}
@@ -359,7 +359,7 @@ func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Read
 		return err
 	}
 	defer dependencies.close()
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: "run", Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, NonInteractive: true, WorkspaceAutomation: true, SessionID: invocation.Arguments[0]})
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: "run", Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: true, WorkspaceAutomation: true, SessionID: invocation.Arguments[0]})
 	if err != nil {
 		return err
 	}
@@ -452,8 +452,13 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	toolset, err := buildRuntimeTools(configuration, filesystem, processService, gitService)
+	sessionStore, err := session.NewFileStore(session.Options{InvocationPath: configuration.Workspace, Ephemeral: configuration.Ephemeral})
 	if err != nil {
+		return runtimeDependencies{}, err
+	}
+	toolset, err := buildRuntimeTools(configuration, filesystem, processService, gitService, sessionStore)
+	if err != nil {
+		_ = sessionStore.Close()
 		return runtimeDependencies{}, err
 	}
 	modelClient, err := modelhttp.New(profile, modelhttp.Options{TokenCounter: usage.ByteEstimator{}, OnRetry: func(attempt int, delay time.Duration) {
@@ -463,11 +468,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	}})
 	if err != nil {
 		toolset.close()
-		return runtimeDependencies{}, err
-	}
-	sessionStore, err := session.NewFileStore(session.Options{InvocationPath: configuration.Workspace, Ephemeral: configuration.Ephemeral})
-	if err != nil {
-		toolset.close()
+		_ = sessionStore.Close()
 		return runtimeDependencies{}, err
 	}
 	contextBuilder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(gitService.StatusSummary)
@@ -475,13 +476,17 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close(); toolset.close() }}, nil
 }
 
-func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service) (runtimeTools, error) {
+func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service, sessionStore session.Store) (runtimeTools, error) {
 	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService, "full")
 	if err != nil {
 		return runtimeTools{}, err
 	}
 	mcpRuntime, err := mcpclient.RegisterTools(context.Background(), registry, configuration.Workspace, configuration.MCPServers)
 	if err != nil {
+		return runtimeTools{}, err
+	}
+	if err := registry.Register(session.NewHistoryTool(sessionStore)); err != nil {
+		_ = mcpRuntime.Close()
 		return runtimeTools{}, err
 	}
 	registry, err = registry.Select(configuration.ToolProfile)
