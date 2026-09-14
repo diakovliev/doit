@@ -111,7 +111,7 @@ Implemented command paths:
 | `doit status` | Report the effective workspace, selected profiles, and Git state. |
 | `doit model test` | Send a minimal request to the selected backend and report normalized response metadata. |
 | `doit config list` | Print the effective non-secret configuration. |
-| `doit session list|inspect|export|resume|prune` | Inspect, resume, export, or prune project-local sessions. |
+| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. |
 | `doit doctor` | Run local workspace, configuration, and profile diagnostics. |
 | `doit --help` | Print CLI usage. Put `--help` before the command. |
 | `doit --version` | Print the CLI version. |
