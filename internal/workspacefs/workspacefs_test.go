@@ -50,6 +50,49 @@ func TestSearchSupportsRegexCaseAndContext(t *testing.T) {
 	}
 }
 
+func TestListAndSearchNestedDocsPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0700); err != nil {
+		t.Fatalf("make docs directory: %v", err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "docs", "design.md"), "Phase 5 design\n")
+	writeWorkspaceFile(t, filepath.Join(root, "docs", "definition.md"), "Product definition\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	listing, err := service.List(context.Background(), ListRequest{Path: "docs", Recursive: true})
+	assertDocsListing(t, listing, err)
+
+	search, err := service.Search(context.Background(), SearchRequest{Path: "docs", Query: "definition", Glob: "*.md"})
+	assertDocsSearch(t, search, err, "docs/definition.md")
+
+	rootSearch, err := service.Search(context.Background(), SearchRequest{Query: "Phase", Glob: "docs/*.md"})
+	assertDocsSearch(t, rootSearch, err, "docs/design.md")
+}
+
+func assertDocsListing(t *testing.T, listing ListResponse, err error) {
+	t.Helper()
+	if err != nil || len(listing.Entries) != 2 {
+		t.Fatalf("unexpected docs listing: %+v, error=%v", listing, err)
+	}
+	byPath := make(map[string]bool, len(listing.Entries))
+	for _, entry := range listing.Entries {
+		byPath[entry.Path] = true
+	}
+	if !byPath["docs/design.md"] || !byPath["docs/definition.md"] {
+		t.Fatalf("docs listing omitted expected files: %+v", listing.Entries)
+	}
+}
+
+func assertDocsSearch(t *testing.T, search SearchResponse, err error, expectedPath string) {
+	t.Helper()
+	if err != nil || len(search.Matches) != 1 || search.Matches[0].Path != expectedPath {
+		t.Fatalf("unexpected docs search: %+v, error=%v", search, err)
+	}
+}
+
 func TestSearchRejectsUnknownMode(t *testing.T) {
 	service, err := New(t.TempDir())
 	if err != nil {
@@ -325,7 +368,7 @@ func TestInspectionToolSchemasDeclareRequiredProperties(t *testing.T) {
 	}
 }
 
-func TestListSchemaDeclaresEmptyProperties(t *testing.T) {
+func TestListSchemaDeclaresSupportedProperties(t *testing.T) {
 	service, err := New(t.TempDir())
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -345,8 +388,10 @@ func TestListSchemaDeclaresEmptyProperties(t *testing.T) {
 	if err := json.Unmarshal(tool.Definition().Parameters, &schema); err != nil {
 		t.Fatalf("decode fs.list schema: %v", err)
 	}
-	if schema.Properties == nil {
-		t.Fatalf("fs.list schema does not declare an empty properties object: %s", tool.Definition().Parameters)
+	for _, property := range []string{"path", "recursive", "max_entries", "max_depth", "include_ignored"} {
+		if _, ok := schema.Properties[property]; !ok {
+			t.Fatalf("fs.list schema does not declare %q: %s", property, tool.Definition().Parameters)
+		}
 	}
 }
 
