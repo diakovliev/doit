@@ -37,6 +37,7 @@ type Request struct {
 	Tools           []ToolDefinition `json:"tools,omitempty"`
 	ToolChoice      string           `json:"tool_choice,omitempty"`
 	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
 }
 
 // ToolCall is a normalized function call returned by a model.
@@ -57,9 +58,21 @@ type Response struct {
 	ProviderRequestID string       `json:"provider_request_id,omitempty"`
 }
 
+// StreamEvent is one normalized event emitted while a model response streams.
+type StreamEvent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
 // ModelClient creates normalized model responses.
 type ModelClient interface {
 	Create(context.Context, Request) (Response, error)
+}
+
+// StreamingModelClient optionally supports incremental Responses API events.
+type StreamingModelClient interface {
+	ModelClient
+	CreateStream(context.Context, Request, func(StreamEvent) error) (Response, error)
 }
 
 // Validate checks the fields required before a request reaches a backend.
