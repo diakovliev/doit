@@ -58,6 +58,17 @@ type Call struct {
 	Arguments json.RawMessage
 }
 
+// ChangeSet identifies a bounded workspace mutation and its content hashes.
+type ChangeSet struct {
+	ID           string            `json:"id"`
+	Operation    string            `json:"operation"`
+	State        string            `json:"state"`
+	Approval     string            `json:"approval,omitempty"`
+	Paths        []string          `json:"paths"`
+	BeforeHashes map[string]string `json:"before_hashes"`
+	AfterHashes  map[string]string `json:"after_hashes"`
+}
+
 // Result is the normalized outcome returned by every tool.
 type Result struct {
 	Status       Status        `json:"status"`
@@ -66,6 +77,7 @@ type Result struct {
 	ChangedPaths []string      `json:"changed_paths,omitempty"`
 	Truncated    bool          `json:"truncated"`
 	Duration     time.Duration `json:"duration,omitempty"`
+	ChangeSet    *ChangeSet    `json:"change_set,omitempty"`
 }
 
 // Tool is a cancellation-aware structured capability.

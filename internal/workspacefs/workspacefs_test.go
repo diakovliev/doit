@@ -139,6 +139,21 @@ func TestWriteAndMoveFilesAndDirectories(t *testing.T) {
 	writeAndMoveDirectory(t, service, root)
 }
 
+func TestWriteProvidesChangeSet(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	response, err := service.Write(context.Background(), WriteRequest{Path: "created.txt", Content: "content"})
+	if err != nil || response.ChangeSet == nil {
+		t.Fatalf("write did not return a change set: %+v, error=%v", response, err)
+	}
+	if response.ChangeSet.Operation != "fs.write" || response.ChangeSet.State != "applied" || response.ChangeSet.BeforeHashes["created.txt"] != "" || response.ChangeSet.AfterHashes["created.txt"] == "" {
+		t.Fatalf("unexpected write change set: %+v", response.ChangeSet)
+	}
+}
+
 func writeAndMoveFile(t *testing.T, service *Service) {
 	t.Helper()
 	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "first", Parents: true})

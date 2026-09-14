@@ -467,10 +467,11 @@ type WriteRequest struct {
 
 // WriteResponse describes the written workspace file.
 type WriteResponse struct {
-	Path      string `json:"path"`
-	Bytes     int    `json:"bytes"`
-	Created   bool   `json:"created"`
-	Overwrote bool   `json:"overwrote"`
+	Path      string           `json:"path"`
+	Bytes     int              `json:"bytes"`
+	Created   bool             `json:"created"`
+	Overwrote bool             `json:"overwrote"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Write creates or explicitly overwrites one bounded workspace file.
@@ -495,6 +496,10 @@ func (service *Service) Write(ctx context.Context, request WriteRequest) (WriteR
 }
 
 func writeRootFile(root *os.Root, path string, content []byte, request WriteRequest) (WriteResponse, error) {
+	before, beforeExists, err := readRootSnapshot(root, path)
+	if err != nil {
+		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
+	}
 	exists, err := prepareRootFile(root, path, request)
 	if err != nil {
 		return WriteResponse{}, err
@@ -508,7 +513,46 @@ func writeRootFile(root *os.Root, path string, content []byte, request WriteRequ
 	if err != nil {
 		return WriteResponse{}, apperr.Wrap(apperr.KindTool, "workspacefs.write", err)
 	}
-	return WriteResponse{Path: filepath.ToSlash(path), Bytes: written, Created: !exists, Overwrote: exists}, nil
+	changeSet, err := newChangeSet("fs.write", "applied", []string{filepath.ToSlash(path)}, before, beforeExists, content, true)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	return WriteResponse{Path: filepath.ToSlash(path), Bytes: written, Created: !exists, Overwrote: exists, ChangeSet: changeSet}, nil
+}
+
+func readRootSnapshot(root *os.Root, path string) ([]byte, bool, error) {
+	content, err := root.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return content, true, nil
+}
+
+func newChangeSet(operation, state string, paths []string, before []byte, beforeExists bool, after []byte, afterExists bool) (*tools.ChangeSet, error) {
+	beforeHashes := map[string]string{paths[0]: snapshotHash(before, beforeExists)}
+	afterHashes := map[string]string{paths[0]: snapshotHash(after, afterExists)}
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: operation, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "workspacefs.change_set", err)
+	}
+	digest := sha256.Sum256(identity)
+	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: operation, State: state, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
+}
+
+func snapshotHash(content []byte, exists bool) string {
+	if !exists {
+		return ""
+	}
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 func prepareRootFile(root *os.Root, path string, request WriteRequest) (bool, error) {
@@ -722,7 +766,7 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 
 func mutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: writeChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request WriteRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -759,6 +803,7 @@ type toolAdapter struct {
 	parameters   string
 	risk         tools.Risk
 	changedPaths func(any) []string
+	changeSet    func(any) *tools.ChangeSet
 	execute      func(context.Context, tools.Call) (any, error)
 }
 
@@ -779,6 +824,9 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	if adapter.changedPaths != nil {
 		result.ChangedPaths = adapter.changedPaths(data)
 	}
+	if adapter.changeSet != nil {
+		result.ChangeSet = adapter.changeSet(data)
+	}
 	return result
 }
 
@@ -796,6 +844,14 @@ func moveChangedPaths(data any) []string {
 		return nil
 	}
 	return []string{response.From, response.To}
+}
+
+func writeChangeSet(data any) *tools.ChangeSet {
+	response, ok := data.(WriteResponse)
+	if !ok {
+		return nil
+	}
+	return response.ChangeSet
 }
 
 func (response WriteResponse) changedPath() string  { return response.Path }
