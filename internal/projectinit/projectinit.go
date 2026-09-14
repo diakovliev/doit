@@ -33,6 +33,7 @@ var templates = []template{
 
 const configTemplate = `{
   "default_profile": "lmstudio",
+	"tool_profile": "full",
   "profiles": {
     "lmstudio": {
       "api_root": "http://localhost:1234/v1",

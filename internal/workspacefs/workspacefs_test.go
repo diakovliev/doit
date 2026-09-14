@@ -29,6 +29,41 @@ func TestReadSearchHashAndListStayBounded(t *testing.T) {
 	requireHash(ctx, t, service)
 }
 
+func TestSearchSupportsRegexCaseAndContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatalf("make nested fixture: %v", err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "nested", "source.go"), "before\nTODO: FixThing\nafter\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	caseInsensitive := false
+	response, err := service.Search(context.Background(), SearchRequest{Query: `todo:\s+fixthing`, Mode: "regex", CaseSensitive: &caseInsensitive, Glob: "*.go", BeforeLines: 1, AfterLines: 1})
+	if err != nil || len(response.Matches) != 1 {
+		t.Fatalf("unexpected regex search response: %+v, error=%v", response, err)
+	}
+	match := response.Matches[0]
+	if match.Line != 2 || len(match.Before) != 1 || match.Before[0] != "before" || len(match.After) != 1 || match.After[0] != "after" {
+		t.Fatalf("unexpected search context: %+v", match)
+	}
+}
+
+func TestSearchRejectsUnknownMode(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.Search(context.Background(), SearchRequest{Query: "value", Mode: "glob"}); err == nil {
+		t.Fatal("expected unknown search mode to fail")
+	}
+	negative := -1
+	if _, err := service.Search(context.Background(), SearchRequest{Query: "value", BeforeLines: negative}); err == nil {
+		t.Fatal("expected negative context lines to fail")
+	}
+}
+
 func requireRead(ctx context.Context, t *testing.T, service *Service) {
 	t.Helper()
 	response, err := service.Read(ctx, ReadRequest{Path: "source.txt", MaxBytes: 12})

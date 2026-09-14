@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ type Definition struct {
 	Executable  string
 	Arguments   []string
 	Environment []string
+	Kind        string
 }
 
 // Runner executes definitions below one workspace root.
@@ -87,8 +90,10 @@ func (runner *Runner) Run(ctx context.Context, task process.Task) (process.Resul
 	command.Stdout = &limitedWriter{writer: &stdout, limit: runner.maxOutput}
 	command.Stderr = &limitedWriter{writer: &stderr, limit: runner.maxOutput}
 	runErr := command.Run()
-	result := process.Result{Duration: time.Since(started), Stdout: stdout.String(), Stderr: stderr.String(), Truncated: len(stdout.Bytes()) >= runner.maxOutput || len(stderr.Bytes()) >= runner.maxOutput}
-	return runner.finish(processContext, runErr, result)
+	result := process.Result{Task: task.Name, Kind: definition.Kind, WorkingDirectory: workingDirectory, Duration: time.Since(started), Stdout: stdout.String(), Stderr: stderr.String(), Diagnostics: parseDiagnostics(stdout.String(), stderr.String()), Truncated: len(stdout.Bytes()) >= runner.maxOutput || len(stderr.Bytes()) >= runner.maxOutput}
+	result, runErr = runner.finish(processContext, runErr, result)
+	result.Passed = runErr == nil && result.ExitCode == 0 && !result.TimedOut
+	return result, runErr
 }
 
 // RegisterTool exposes the allowlisted process runner as process.run.
@@ -172,7 +177,34 @@ func (runner *Runner) workingDirectory(requested string) (string, error) {
 	if err != nil || !withinRoot(runner.workspace, candidate) {
 		return "", apperr.New(apperr.KindPolicy, "processrunner.run", "working directory escapes the workspace")
 	}
+	return runner.validateWorkingDirectory(candidate)
+}
+
+func (runner *Runner) validateWorkingDirectory(candidate string) (string, error) {
+	realRoot, err := filepath.EvalSymlinks(runner.workspace)
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindTool, "processrunner.run", err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(candidate))
+	if err != nil {
+		return "", apperr.Wrap(apperr.KindPolicy, "processrunner.run", err)
+	}
+	if !withinRoot(realRoot, resolvedParent) {
+		return "", symlinkEscapeError()
+	}
+	info, statErr := os.Stat(candidate)
+	if statErr != nil {
+		return "", apperr.Wrap(apperr.KindTool, "processrunner.run", statErr)
+	}
+	resolvedCandidate, resolveErr := filepath.EvalSymlinks(candidate)
+	if resolveErr != nil || !info.IsDir() || !withinRoot(realRoot, resolvedCandidate) {
+		return "", symlinkEscapeError()
+	}
 	return candidate, nil
+}
+
+func symlinkEscapeError() error {
+	return apperr.New(apperr.KindPolicy, "processrunner.run", "working directory escapes the workspace through a symlink")
 }
 
 func (runner *Runner) finish(processContext context.Context, runErr error, result process.Result) (process.Result, error) {
@@ -218,4 +250,37 @@ func (writer *limitedWriter) Write(data []byte) (int, error) {
 func withinRoot(root, candidate string) bool {
 	relative, err := filepath.Rel(root, candidate)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+var diagnosticPattern = regexp.MustCompile(`^(.*?):([0-9]+)(?::([0-9]+))?:\s*(?:(error|warning|fatal):\s*)?(.*)$`)
+
+func parseDiagnostics(outputs ...string) []process.Diagnostic {
+	diagnostics := make([]process.Diagnostic, 0)
+	for _, output := range outputs {
+		for _, line := range strings.Split(output, "\n") {
+			match := diagnosticPattern.FindStringSubmatch(strings.TrimSpace(line))
+			if len(match) == 0 || strings.TrimSpace(match[5]) == "" {
+				continue
+			}
+			lineNumber := parseDiagnosticNumber(match[2])
+			column := parseDiagnosticNumber(match[3])
+			severity := match[4]
+			if severity == "" {
+				severity = "error"
+			}
+			diagnostics = append(diagnostics, process.Diagnostic{Path: match[1], Line: lineNumber, Column: column, Severity: severity, Message: strings.TrimSpace(match[5])})
+		}
+	}
+	return diagnostics
+}
+
+func parseDiagnosticNumber(value string) int {
+	if value == "" {
+		return 0
+	}
+	var number int
+	for _, character := range value {
+		number = number*10 + int(character-'0')
+	}
+	return number
 }
