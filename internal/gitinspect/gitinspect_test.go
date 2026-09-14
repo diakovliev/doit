@@ -26,6 +26,50 @@ func TestGitInspectionReadsFixtureRepository(t *testing.T) {
 	requireGitShow(t, service)
 }
 
+func TestGitDiffCanIncludeUntrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := newGitFixture(t)
+	untrackedPath := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(untrackedPath, []byte("new file\nsecond line\n"), 0600); err != nil {
+		t.Fatalf("write untracked fixture: %v", err)
+	}
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	diff, err := service.Diff(context.Background(), DiffRequest{Source: "worktree", IncludeUntracked: true})
+	if err != nil {
+		t.Fatalf("diff with untracked files: %v", err)
+	}
+	if !strings.Contains(diff.Diff, "new file mode") || !strings.Contains(diff.Diff, "+++ b/new.txt") || !strings.Contains(diff.Diff, "+new file") {
+		t.Fatalf("untracked file was not included in diff: %q", diff.Diff)
+	}
+}
+
+func TestGitBranchAndWorktreeInspection(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := newGitFixture(t)
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	branch, err := service.Branch(context.Background(), BranchRequest{})
+	if err != nil {
+		t.Fatalf("inspect branch: %v", err)
+	}
+	if branch.Repository == "" || branch.Detached || branch.Branch == "" {
+		t.Fatalf("unexpected branch response: %+v", branch)
+	}
+	worktrees, err := service.Worktrees(context.Background(), WorktreeRequest{})
+	if err != nil || len(worktrees.Worktrees) == 0 || worktrees.Worktrees[0].Path == "" {
+		t.Fatalf("unexpected worktree response: %+v, error=%v", worktrees, err)
+	}
+}
+
 func newGitFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
