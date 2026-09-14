@@ -1,0 +1,102 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - revive
+    - gosec
+    - ineffassign
+    - staticcheck
+    - unconvert
+    - unused
+    - intrange
+    - errorlint
+    - dupl
+    - perfsprint
+    - gocyclo
+    - bodyclose
+    - copyloopvar
+    - errchkjson
+    - spancheck
+    - usetesting
+    - zerologlint
+    - nolintlint
+    - nilerr
+
+  settings:
+    revive:
+      enable-all-rules: true
+      confidence: 0.8
+      rules:
+        - name: var-naming
+          disabled: true
+        - name: exported
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: line-length-limit
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: add-constant
+          disabled: true
+        - name: bare-return
+          disabled: true
+        - name: function-result-limit
+          disabled: true
+        - name: unexported-naming
+          disabled: true
+        - name: flag-parameter
+          disabled: true
+        - name: max-public-structs
+          disabled: true
+        - name: function-length
+          disabled: true
+        - name: confusing-naming
+          disabled: true
+        - name: empty-lines
+          disabled: true
+        - name: unnecessary-stmt
+          disabled: true
+        - name: argument-limit
+          arguments:
+            - 100
+        - name: unchecked-type-assertion
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+        - name: enforce-switch-style
+          disabled: true
+        - name: identical-switch-branches
+          disabled: true
+
+    gocyclo:
+      # Maximum allowed complexity before reporting.
+      # Default: 10
+      min-complexity: 10
+    errorlint:
+      # Check whether fmt.Errorf uses the %w verb for formatting errors.
+      # See the https://github.com/polyfloyd/go-errorlint for caveats.
+      # Default: true
+      errorf: true
+      # Permit more than 1 %w verb, valid per Go 1.20 (requires `errorf: true`).
+      # Default: true
+      errorf-multi: true
+      # Check for plain type assertions and type switches.
+      # Default: true
+      asserts: true
+      # Check for plain error comparisons.
+      # Default: true
+      comparison: true
+      # # Allowed errors.
+      # # Default: []
+      # allowed-errors:
+      #   - err: "io.EOF"
+      #     fun: "example.com/pkg.Read"
+      # # Allowed error "wildcards".
+      # # Default: []
+      # allowed-errors-wildcard:
+      #   - err: "example.com/pkg.ErrMagic"
+      #     fun: "example.com/pkg.Magic"    
