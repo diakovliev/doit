@@ -96,6 +96,46 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	}
 }
 
+type changedPathTool struct{}
+
+func (changedPathTool) Definition() tools.Definition {
+	return tools.Definition{Name: "fs.write", Risk: tools.RiskWrite}
+}
+
+func (changedPathTool) Execute(context.Context, tools.Call) tools.Result {
+	return tools.Result{Status: tools.StatusSucceeded, ChangedPaths: []string{"generated.txt"}}
+}
+
+func TestRunnerAggregatesChangedPathsIntoOutcome(t *testing.T) {
+	root := t.TempDir()
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := registry.Register(changedPathTool{}); err != nil {
+		t.Fatalf("register changed-path tool: %v", err)
+	}
+	store, err := session.NewFileStore(session.Options{InvocationPath: root, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("new session store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	client := &sequenceClient{responses: []model.Response{
+		{ID: "call", Status: "in_progress", ToolCalls: []model.ToolCall{{CallID: "1", Name: "fs.write", Arguments: `{}`}}},
+		{ID: "done", Status: "completed", Text: "finished"},
+	}}
+	runner := Runner{Client: client, Context: contextdata.New(filesystem, usage.ByteEstimator{}), Tools: registry, Policy: policy.DefaultPolicy{}, Sessions: store}
+
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "make a file", Workspace: root, Model: "test-model", WorkspaceAutomation: true, NonInteractive: true})
+	if err != nil {
+		t.Fatalf("run changed-path task: %v", err)
+	}
+	if len(outcome.ChangedPaths) != 1 || outcome.ChangedPaths[0] != "generated.txt" {
+		t.Fatalf("unexpected changed paths: %+v", outcome.ChangedPaths)
+	}
+}
+
 func newAgentTestRunner(t *testing.T, root string) (Runner, *session.FileStore) {
 	return newAgentTestRunnerWithEphemeral(t, root, true)
 }

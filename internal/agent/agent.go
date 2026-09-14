@@ -119,6 +119,7 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 
 func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
 	totalUsage := initialUsage
+	changedPaths := make([]string, 0)
 	maxRounds := runner.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = defaultMaxRounds
@@ -129,7 +130,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 		if createErr != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, createErr)
 		}
-		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, round == 0, initialUsage)
+		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, changedPaths, round == 0, initialUsage)
 		if err != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, err
 		}
@@ -137,7 +138,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 			runner.emit(ProgressEvent{Phase: "session", Message: "task completed"})
 			return outcome, nil
 		}
-		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, nonInteractive, workspaceAutomation); err != nil {
+		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, &changedPaths, nonInteractive, workspaceAutomation); err != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 		}
 	}
@@ -145,7 +146,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 }
 
-func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
+func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
 	*totalUsage = addResponseUsage(*totalUsage, response.Usage, first, initialUsage)
 	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("model response received (%d tool call(s))", len(response.ToolCalls))})
 	if err := runner.appendEvent(ctx, sessionID, "model_message", response); err != nil {
@@ -158,7 +159,7 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 	if len(response.ToolCalls) > 0 {
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, nil
 	}
-	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage}
+	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, ChangedPaths: append([]string(nil), changedPaths...)}
 	if err := runner.completeSession(ctx, sessionID, outcome); err != nil {
 		return outcome, false, err
 	}
@@ -320,7 +321,7 @@ func sanitizeHistory(history []model.InputItem) []model.InputItem {
 	return result
 }
 
-func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, changedPaths *[]string, nonInteractive bool, workspaceAutomation bool) error {
 	for _, call := range calls {
 		tool, exists := runner.Tools.Lookup(call.Name)
 		if !exists {
@@ -348,6 +349,7 @@ func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID,
 		toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
 		if decision == policy.DecisionAllow {
 			toolResult = tool.Execute(ctx, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+			*changedPaths = appendUniquePaths(*changedPaths, toolResult.ChangedPaths)
 		}
 		if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 			return err
@@ -363,6 +365,24 @@ func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID,
 		)
 	}
 	return nil
+}
+
+func appendUniquePaths(existing, additions []string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	for _, path := range existing {
+		seen[path] = struct{}{}
+	}
+	for _, path := range additions {
+		if path == "" {
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		existing = append(existing, path)
+	}
+	return existing
 }
 
 func (runner *Runner) emit(event ProgressEvent) {
