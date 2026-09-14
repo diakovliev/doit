@@ -128,7 +128,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService)
+	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService, configuration.ToolProfile)
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
@@ -154,10 +154,10 @@ func buildRegistry(workspace string, filesystem *workspacefs.Service, processSer
 	if err != nil {
 		return nil, err
 	}
-	return buildRegistryWithGit(workspace, filesystem, processService, gitService)
+	return buildRegistryWithGit(workspace, filesystem, processService, gitService, "full")
 }
 
-func buildRegistryWithGit(workspace string, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service) (*tools.Registry, error) {
+func buildRegistryWithGit(workspace string, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service, toolProfile string) (*tools.Registry, error) {
 	registry := tools.NewRegistry()
 	if err := workspacefs.RegisterTools(registry, filesystem); err != nil {
 		return nil, err
@@ -175,7 +175,7 @@ func buildRegistryWithGit(workspace string, filesystem *workspacefs.Service, pro
 	if err := codetools.RegisterTools(registry, codeService); err != nil {
 		return nil, err
 	}
-	return registry, nil
+	return registry.Select(toolProfile)
 }
 
 func requestText(invocation cli.Invocation, stdin io.Reader, stdout io.Writer) (string, error) {
@@ -238,7 +238,7 @@ func ephemeralOverride(invocation cli.Invocation) *bool {
 
 func registerConfiguredTasks(runner *processrunner.Runner, tasks map[string]config.TaskConfig) error {
 	for name, task := range tasks {
-		if err := runner.Register(processrunner.Definition{Name: name, Executable: task.Executable, Arguments: task.Arguments, Environment: task.Environment}); err != nil {
+		if err := runner.Register(processrunner.Definition{Name: name, Executable: task.Executable, Arguments: task.Arguments, Environment: task.Environment, Kind: task.Kind}); err != nil {
 			return err
 		}
 	}
