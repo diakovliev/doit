@@ -46,17 +46,19 @@ type TaskConfig struct {
 	Executable  string   `json:"executable"`
 	Arguments   []string `json:"arguments,omitempty"`
 	Environment []string `json:"environment,omitempty"`
+	Kind        string   `json:"kind,omitempty"`
 }
 
 // Config is the effective configuration after all sources are merged.
 type Config struct {
-	Workspace string                    `json:"workspace"`
-	Profile   string                    `json:"profile"`
-	Format    string                    `json:"format"`
-	Ephemeral bool                      `json:"ephemeral"`
-	Profiles  map[string]BackendProfile `json:"profiles"`
-	Tasks     map[string]TaskConfig     `json:"tasks"`
-	Token     TokenBudget               `json:"token"`
+	Workspace   string                    `json:"workspace"`
+	Profile     string                    `json:"profile"`
+	ToolProfile string                    `json:"tool_profile"`
+	Format      string                    `json:"format"`
+	Ephemeral   bool                      `json:"ephemeral"`
+	Profiles    map[string]BackendProfile `json:"profiles"`
+	Tasks       map[string]TaskConfig     `json:"tasks"`
+	Token       TokenBudget               `json:"token"`
 }
 
 // Overrides are values supplied by environment variables or CLI flags.
@@ -80,6 +82,7 @@ type LoadOptions struct {
 
 type fileConfig struct {
 	DefaultProfile string                    `json:"default_profile"`
+	ToolProfile    string                    `json:"tool_profile"`
 	Profiles       map[string]BackendProfile `json:"profiles"`
 	Format         string                    `json:"format"`
 	Ephemeral      *bool                     `json:"ephemeral"`
@@ -140,12 +143,13 @@ func absoluteWorkspace(workspace string) (string, error) {
 
 func defaultConfig(workspace string) Config {
 	return Config{
-		Workspace: workspace,
-		Profile:   "default",
-		Format:    "human",
-		Profiles:  make(map[string]BackendProfile),
-		Tasks:     make(map[string]TaskConfig),
-		Token:     DefaultTokenBudget(),
+		Workspace:   workspace,
+		Profile:     "default",
+		ToolProfile: "full",
+		Format:      "human",
+		Profiles:    make(map[string]BackendProfile),
+		Tasks:       make(map[string]TaskConfig),
+		Token:       DefaultTokenBudget(),
 	}
 }
 
@@ -235,6 +239,9 @@ func readFileConfig(filePath string) (fileConfig, error) {
 func applyFileConfig(result *Config, loaded fileConfig) {
 	if loaded.DefaultProfile != "" {
 		result.Profile = loaded.DefaultProfile
+	}
+	if loaded.ToolProfile != "" {
+		result.ToolProfile = loaded.ToolProfile
 	}
 	for name, profile := range loaded.Profiles {
 		profile.APIRoot = strings.TrimRight(profile.APIRoot, "/")

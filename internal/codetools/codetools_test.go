@@ -70,6 +70,27 @@ func TestPatchRejectsHashConflictAndPathEscape(t *testing.T) {
 	}
 }
 
+func TestRenameRejectsSymlinkEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace, "linked")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "source.txt"), []byte("content"), 0600); err != nil {
+		t.Fatalf("write source fixture: %v", err)
+	}
+	service, err := New(workspace, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.Rename(context.Background(), RenameRequest{From: "source.txt", To: "linked/moved.txt"}); err == nil {
+		t.Fatal("expected rename through an escaping symlink to fail")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "moved.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rename escaped workspace: %v", err)
+	}
+}
+
 func TestPatchUpdatePreservesUnchangedContent(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "file.txt")
@@ -114,5 +135,28 @@ func TestPatchReportsAndSkipsNoOp(t *testing.T) {
 	}
 	if contents := readCodeFixture(t, root); string(contents) != "old\n" {
 		t.Fatalf("unexpected no-op content: %q", contents)
+	}
+}
+
+func TestPatchRollsBackEarlierOperationsWhenLaterOperationFails(t *testing.T) {
+	root := t.TempDir()
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("open fixture root: %v", err)
+	}
+	err = service.applyOperations(rootHandle, []patchOperation{
+		{path: "created.txt", content: "created\n"},
+		{path: "missing.txt", delete: true},
+	})
+	_ = rootHandle.Close()
+	if err == nil {
+		t.Fatal("expected second operation to fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, "created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("earlier operation was not rolled back: %v", err)
 	}
 }

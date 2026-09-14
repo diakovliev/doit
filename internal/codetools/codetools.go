@@ -3,6 +3,7 @@ package codetools
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -80,10 +81,13 @@ func (service *Service) ApplyPatch(ctx context.Context, request PatchRequest) (P
 	if err != nil {
 		return PatchResponse{}, err
 	}
-	for _, operation := range operations {
-		if err := service.applyOperation(operation); err != nil {
-			return PatchResponse{}, err
-		}
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return PatchResponse{}, apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := service.applyOperations(root, operations); err != nil {
+		return PatchResponse{}, err
 	}
 	return PatchResponse{Patch: request.Patch, Paths: preview.Paths, Applied: true, Changed: preview.Changed}, nil
 }
@@ -113,12 +117,17 @@ func (service *Service) Rename(ctx context.Context, request RenameRequest) (Rena
 	if err != nil {
 		return RenameResponse{}, err
 	}
-	if _, err := os.Stat(to); err == nil {
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Stat(to); err == nil {
 		return RenameResponse{}, apperr.New(apperr.KindPolicy, "codetools.rename", "destination already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
 	}
-	if err := os.Rename(from, to); err != nil {
+	if err := root.Rename(from, to); err != nil {
 		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
 	}
 	return RenameResponse{From: filepath.ToSlash(request.From), To: filepath.ToSlash(request.To)}, nil
@@ -158,14 +167,14 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			}
 			return service.CheckPatch(ctx, request)
 		}},
-		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, changedPaths: patchChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.ApplyPatch(ctx, request)
 		}},
-		{name: "code.rename", description: "Rename one workspace path after approval.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.rename", description: "Rename one workspace path after approval.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: renameChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RenameRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -189,11 +198,12 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 }
 
 type toolAdapter struct {
-	name        string
-	description string
-	parameters  string
-	risk        tools.Risk
-	execute     func(context.Context, tools.Call) (any, error)
+	name         string
+	description  string
+	parameters   string
+	risk         tools.Risk
+	changedPaths func(any) []string
+	execute      func(context.Context, tools.Call) (any, error)
 }
 
 func (adapter toolAdapter) Definition() tools.Definition {
@@ -205,7 +215,27 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	if err != nil {
 		return tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Message: err.Error()}}}
 	}
-	return tools.Result{Status: tools.StatusSucceeded, Data: data}
+	result := tools.Result{Status: tools.StatusSucceeded, Data: data}
+	if adapter.changedPaths != nil {
+		result.ChangedPaths = adapter.changedPaths(data)
+	}
+	return result
+}
+
+func patchChangedPaths(data any) []string {
+	response, ok := data.(PatchResponse)
+	if !ok || !response.Changed {
+		return nil
+	}
+	return append([]string(nil), response.Paths...)
+}
+
+func renameChangedPaths(data any) []string {
+	response, ok := data.(RenameResponse)
+	if !ok {
+		return nil
+	}
+	return []string{response.From, response.To}
 }
 
 type patchOperation struct {
@@ -215,52 +245,121 @@ type patchOperation struct {
 	delete      bool
 }
 
-func (service *Service) applyOperation(operation patchOperation) error {
+type fileSnapshot struct {
+	path    string
+	content []byte
+	exists  bool
+}
+
+func (service *Service) applyOperations(root *os.Root, operations []patchOperation) error {
+	snapshots, err := service.captureSnapshots(root, operations)
+	if err != nil {
+		return err
+	}
+	for _, operation := range operations {
+		if err := service.applyOperation(root, operation); err != nil {
+			if rollbackErr := rollbackSnapshots(root, snapshots); rollbackErr != nil {
+				return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", errors.Join(err, rollbackErr))
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (service *Service) captureSnapshots(root *os.Root, operations []patchOperation) ([]fileSnapshot, error) {
+	snapshots := make([]fileSnapshot, 0, len(operations))
+	for _, operation := range operations {
+		path, err := service.scopedPath(operation.path)
+		if err != nil {
+			return nil, err
+		}
+		_, statErr := root.Stat(path)
+		if errors.Is(statErr, os.ErrNotExist) {
+			snapshots = append(snapshots, fileSnapshot{path: path})
+			continue
+		}
+		if statErr != nil {
+			return nil, apperr.Wrap(apperr.KindTool, "codetools.apply_patch", statErr)
+		}
+		content, readErr := root.ReadFile(path)
+		if readErr != nil {
+			return nil, apperr.Wrap(apperr.KindTool, "codetools.apply_patch", readErr)
+		}
+		snapshots = append(snapshots, fileSnapshot{path: path, content: content, exists: true})
+	}
+	return snapshots, nil
+}
+
+func rollbackSnapshots(root *os.Root, snapshots []fileSnapshot) error {
+	var rollbackErr error
+	for index := len(snapshots) - 1; index >= 0; index-- {
+		snapshot := snapshots[index]
+		if snapshot.exists {
+			if err := writeOperation(root, snapshot.path, string(snapshot.content)); err != nil {
+				rollbackErr = errors.Join(rollbackErr, err)
+			}
+			continue
+		}
+		if err := root.Remove(snapshot.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+	}
+	return rollbackErr
+}
+
+func (service *Service) applyOperation(root *os.Root, operation patchOperation) error {
 	path, err := service.scopedPath(operation.path)
 	if err != nil {
 		return err
 	}
 	if operation.delete {
-		if err := os.Remove(path); err != nil {
+		if err := root.Remove(path); err != nil {
 			return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 		}
 		return nil
 	}
-	content, err := service.operationContent(path, operation)
+	content, err := operationContent(root, path, operation)
 	if err != nil {
 		return err
 	}
-	current, readErr := service.readWorkspaceFile(path)
+	current, readErr := root.ReadFile(path)
 	if readErr == nil && string(current) == content {
 		return nil
 	}
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", readErr)
 	}
-	return service.writeOperation(path, content)
+	return writeOperation(root, path, content)
 }
 
-func (service *Service) operationContent(path string, operation patchOperation) (string, error) {
+func operationContent(root *os.Root, path string, operation patchOperation) (string, error) {
 	if len(operation.updateLines) == 0 {
 		return operation.content, nil
 	}
-	current, err := service.readWorkspaceFile(path)
+	current, err := root.ReadFile(path)
 	if err != nil {
 		return "", apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
 	return applyUpdateLines(string(current), operation.updateLines)
 }
 
-func (service *Service) writeOperation(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
+func writeOperation(root *os.Root, path, content string) error {
+	parent := filepath.Dir(path)
+	if parent != "." {
+		if err := root.MkdirAll(parent, 0700); err != nil {
+			return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
+		}
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".doit-patch-*")
+	temporaryPath, err := temporaryPath(parent)
 	if err != nil {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
+	temporary, err := root.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
+	}
+	defer func() { _ = root.Remove(temporaryPath) }()
 	if _, err := temporary.WriteString(content); err != nil {
 		_ = temporary.Close()
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
@@ -272,56 +371,65 @@ func (service *Service) writeOperation(path, content string) error {
 	if err := temporary.Close(); err != nil {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := root.Rename(temporaryPath, path); err != nil {
 		return apperr.Wrap(apperr.KindTool, "codetools.apply_patch", err)
 	}
 	return nil
 }
 
-func (service *Service) readWorkspaceFile(path string) ([]byte, error) {
-	root, err := os.OpenRoot(service.workspace)
-	if err != nil {
-		return nil, err
+func temporaryPath(parent string) (string, error) {
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
 	}
-	defer func() { _ = root.Close() }()
-	relativePath, err := filepath.Rel(service.workspace, path)
-	if err != nil {
-		return nil, err
-	}
-	return root.ReadFile(relativePath)
+	return filepath.Join(parent, ".doit-patch-"+hex.EncodeToString(suffix)), nil
 }
 
 func (service *Service) patchChanged(operations []patchOperation) (bool, error) {
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+	}
+	defer func() { _ = root.Close() }()
 	for _, operation := range operations {
-		path, err := service.scopedPath(operation.path)
+		changed, err := service.operationChanged(root, operation)
 		if err != nil {
 			return false, err
 		}
-		if operation.delete {
-			if _, err := os.Stat(path); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
-				}
-				return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
-			}
-			return true, nil
-		}
-		content, err := service.operationContent(path, operation)
-		if err != nil {
-			return false, err
-		}
-		current, err := service.readWorkspaceFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
-		}
-		if err != nil {
-			return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
-		}
-		if string(current) != content {
+		if changed {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func (service *Service) operationChanged(root *os.Root, operation patchOperation) (bool, error) {
+	path, err := service.scopedPath(operation.path)
+	if err != nil {
+		return false, err
+	}
+	if operation.delete {
+		return operationExists(root, path)
+	}
+	content, err := operationContent(root, path, operation)
+	if err != nil {
+		return false, err
+	}
+	current, err := root.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+	}
+	return string(current) != content, nil
+}
+
+func operationExists(root *os.Root, path string) (bool, error) {
+	if _, err := root.Stat(path); err != nil {
+		return false, apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
+	}
+	return true, nil
 }
 
 func (service *Service) checkExpectedHashes(paths []string, expected map[string]string) error {
@@ -339,11 +447,7 @@ func (service *Service) checkExpectedHashes(paths []string, expected map[string]
 		if err != nil {
 			return err
 		}
-		relativePath, err := filepath.Rel(service.workspace, path)
-		if err != nil {
-			return apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
-		}
-		contents, err := root.ReadFile(relativePath)
+		contents, err := root.ReadFile(path)
 		if err != nil {
 			return apperr.Wrap(apperr.KindTool, "codetools.check_patch", err)
 		}
@@ -507,5 +611,5 @@ func (service *Service) scopedPath(path string) (string, error) {
 	if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
 		return "", apperr.New(apperr.KindTool, "codetools.path", "path escapes the workspace")
 	}
-	return filepath.Join(service.workspace, cleanPath), nil
+	return filepath.ToSlash(cleanPath), nil
 }
