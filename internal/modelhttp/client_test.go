@@ -32,7 +32,7 @@ func TestClientNormalizesTextFunctionCallsAndProviderUsage(t *testing.T) {
 
 func requireNormalizedResponse(t *testing.T, response model.Response) {
 	t.Helper()
-	if response.ID != "resp-1" || response.Text != "hello" || len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "fs.read" {
+	if response.ID != "resp-1" || response.Text != "hello" || len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "fs.read" || response.RequestID == "" || response.ProviderRequestID != "provider-1" {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 }
@@ -55,6 +55,7 @@ func normalizedResponseHandler(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("X-Request-Id", "provider-1")
 	_, _ = writer.Write([]byte(`{"id":"resp-1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]},{"type":"function_call","call_id":"call-1","name":"fs.read","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":3}}}`))
 }
 

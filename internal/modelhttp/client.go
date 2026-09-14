@@ -118,7 +118,7 @@ func (client *Client) execute(ctx context.Context, body []byte, wireNames map[st
 			if response.statusCode < http.StatusOK || response.statusCode >= http.StatusMultipleChoices {
 				return model.Response{}, backendError(response.statusCode, response.body)
 			}
-			return client.normalizeResponse(ctx, body, response.body, reverseNames(wireNames))
+			return client.normalizeResponse(ctx, body, response.body, response.headers, response.clientRequestID, reverseNames(wireNames))
 		}
 		if attempt >= client.rateLimit.MaxRetries {
 			return model.Response{}, backendError(response.statusCode, response.body)
@@ -134,9 +134,10 @@ func (client *Client) execute(ctx context.Context, body []byte, wireNames map[st
 }
 
 type httpResult struct {
-	statusCode int
-	headers    http.Header
-	body       []byte
+	statusCode      int
+	headers         http.Header
+	body            []byte
+	clientRequestID string
 }
 
 func (client *Client) executeOnce(ctx context.Context, body []byte, reservedTokens int64) (httpResult, error) {
@@ -149,7 +150,8 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 		return httpResult{}, apperr.Wrap(apperr.KindBackend, "modelhttp.request", err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("X-Client-Request-Id", requestID())
+	clientRequestID := requestID()
+	httpRequest.Header.Set("X-Client-Request-Id", clientRequestID)
 	if client.apiKey != "" {
 		httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
 	}
@@ -168,7 +170,7 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 	if err != nil {
 		return httpResult{}, apperr.Wrap(apperr.KindBackend, "modelhttp.read", err)
 	}
-	return httpResult{statusCode: httpResponse.StatusCode, headers: httpResponse.Header, body: responseBody}, nil
+	return httpResult{statusCode: httpResponse.StatusCode, headers: httpResponse.Header, body: responseBody, clientRequestID: clientRequestID}, nil
 }
 
 func defaultRateLimit(configuration config.RateLimitConfig) RateLimitPolicy {
@@ -372,12 +374,12 @@ type wireContentPart struct {
 	Text string `json:"text"`
 }
 
-func (client *Client) normalizeResponse(ctx context.Context, requestBody, responseBody []byte, localNames map[string]string) (model.Response, error) {
+func (client *Client) normalizeResponse(ctx context.Context, requestBody, responseBody []byte, headers http.Header, clientRequestID string, localNames map[string]string) (model.Response, error) {
 	var wire wireResponse
 	if err := json.Unmarshal(responseBody, &wire); err != nil {
 		return model.Response{}, apperr.Wrap(apperr.KindBackend, "modelhttp.decode", err)
 	}
-	response := model.Response{ID: wire.ID, Status: wire.Status}
+	response := model.Response{ID: wire.ID, Status: wire.Status, RequestID: clientRequestID, ProviderRequestID: providerRequestID(headers)}
 	for _, rawItem := range wire.Output {
 		var item wireOutputItem
 		if err := json.Unmarshal(rawItem, &item); err != nil {
@@ -407,6 +409,13 @@ func (client *Client) normalizeResponse(ctx context.Context, requestBody, respon
 		response.Usage = usage.Reconcile(response.Usage, provider)
 	}
 	return response, nil
+}
+
+func providerRequestID(headers http.Header) string {
+	if value := headers.Get("X-Request-Id"); value != "" {
+		return value
+	}
+	return headers.Get("Request-Id")
 }
 
 func (client *Client) estimateUsage(ctx context.Context, requestBody, output []byte) usage.Counts {
