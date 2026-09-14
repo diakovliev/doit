@@ -1,6 +1,10 @@
 {
   "default_profile": "foundry",
   "profiles": {
+    "lmstudio": {
+      "api_root": "http://localhost:1234/v1",
+      "model": "prism-ml/bonsai-27b"
+    },
     "ollama": {
       "api_root": "http://127.0.0.1:11434/v1",
       "model": "phi4-mini:latest"

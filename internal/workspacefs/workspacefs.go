@@ -609,35 +609,35 @@ func registerToolAdapters(registry *tools.Registry, definitions []toolAdapter) e
 
 func readOnlyAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.list", description: "List bounded workspace entries.", parameters: `{"type":"object"}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.list", description: "List bounded workspace entries.", parameters: `{"type":"object","properties":{}}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ListRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.List(ctx, request)
 		}},
-		{name: "fs.stat", description: "Inspect one workspace entry.", parameters: `{"type":"object","required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.stat", description: "Inspect one workspace entry.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StatRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Stat(ctx, request)
 		}},
-		{name: "fs.read", description: "Read bounded workspace text.", parameters: `{"type":"object","required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.read", description: "Read bounded workspace text.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ReadRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Read(ctx, request)
 		}},
-		{name: "fs.search", description: "Search bounded workspace text.", parameters: `{"type":"object","required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.search", description: "Search bounded workspace text.", parameters: `{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request SearchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Search(ctx, request)
 		}},
-		{name: "fs.hash", description: "Hash one workspace file.", parameters: `{"type":"object","required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.hash", description: "Hash one workspace file.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request HashRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err

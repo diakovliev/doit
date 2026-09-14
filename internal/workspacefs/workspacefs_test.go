@@ -2,6 +2,7 @@ package workspacefs
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,70 @@ func TestRegisterTools(t *testing.T) {
 		if !exists || len(tool.Definition().Parameters) == 0 {
 			t.Fatalf("directory tool is not registered with a schema: %s", name)
 		}
+	}
+}
+
+func TestInspectionToolSchemasDeclareRequiredProperties(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := RegisterTools(registry, service); err != nil {
+		t.Fatalf("register filesystem tools: %v", err)
+	}
+
+	expected := map[string]string{
+		"fs.hash":   "path",
+		"fs.read":   "path",
+		"fs.search": "query",
+		"fs.stat":   "path",
+	}
+	for name, property := range expected {
+		tool, exists := registry.Lookup(name)
+		if !exists {
+			t.Fatalf("inspection tool is not registered: %s", name)
+		}
+		var schema struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+		}
+		if err := json.Unmarshal(tool.Definition().Parameters, &schema); err != nil {
+			t.Fatalf("decode %s schema: %v", name, err)
+		}
+		if _, ok := schema.Properties[property]; !ok {
+			t.Fatalf("%s schema does not declare required property %q: %s", name, property, tool.Definition().Parameters)
+		}
+		for _, required := range schema.Required {
+			if _, ok := schema.Properties[required]; !ok {
+				t.Fatalf("%s schema requires undeclared property %q", name, required)
+			}
+		}
+	}
+}
+
+func TestListSchemaDeclaresEmptyProperties(t *testing.T) {
+	service, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := RegisterTools(registry, service); err != nil {
+		t.Fatalf("register filesystem tools: %v", err)
+	}
+
+	tool, exists := registry.Lookup("fs.list")
+	if !exists {
+		t.Fatal("list tool is not registered")
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Definition().Parameters, &schema); err != nil {
+		t.Fatalf("decode fs.list schema: %v", err)
+	}
+	if schema.Properties == nil {
+		t.Fatalf("fs.list schema does not declare an empty properties object: %s", tool.Definition().Parameters)
 	}
 }
 

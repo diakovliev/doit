@@ -536,7 +536,7 @@ func registerAdapters(registry *tools.Registry, adapters []toolAdapter) error {
 
 func gitReadAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.root", description: "Find the containing repository and HEAD state.", parameters: `{"type":"object"}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+		{name: "git.root", description: "Find the containing repository and HEAD state.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
 			var request RootRequest
 			return service.Root(ctx, request)
 		}},
