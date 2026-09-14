@@ -811,7 +811,7 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 			}
 			return service.Read(ctx, request)
 		}},
-		{name: "fs.search", description: "Search bounded workspace text below an optional workspace-relative path, with an optional glob, literal or regular-expression matching, and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.search", description: "Search bounded workspace text below an optional workspace-relative path, with an optional glob, literal or regular-expression matching, and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, maxArguments: 9, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request SearchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -865,6 +865,7 @@ type toolAdapter struct {
 	name         string
 	description  string
 	parameters   string
+	maxArguments int
 	risk         tools.Risk
 	changedPaths func(any) []string
 	changeSet    func(any) *tools.ChangeSet
@@ -876,7 +877,11 @@ func (adapter toolAdapter) Definition() tools.Definition {
 	if risk == "" {
 		risk = tools.RiskReadOnly
 	}
-	return tools.Definition{Name: adapter.name, Description: adapter.description, Parameters: json.RawMessage(adapter.parameters), Risk: risk, Timeout: 30_000_000_000, MaxOutputBytes: defaultMaxBytes, MaxArguments: 8}
+	maxArguments := adapter.maxArguments
+	if maxArguments <= 0 {
+		maxArguments = 8
+	}
+	return tools.Definition{Name: adapter.name, Description: adapter.description, Parameters: json.RawMessage(adapter.parameters), Risk: risk, Timeout: 30_000_000_000, MaxOutputBytes: defaultMaxBytes, MaxArguments: maxArguments}
 }
 
 func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.Result {

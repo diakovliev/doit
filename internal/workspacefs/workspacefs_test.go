@@ -395,6 +395,30 @@ func TestListSchemaDeclaresSupportedProperties(t *testing.T) {
 	}
 }
 
+func TestSearchAcceptsAllDeclaredArguments(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0700); err != nil {
+		t.Fatalf("make docs directory: %v", err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "docs", "plan.md"), "needle\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	registry := tools.NewRegistry()
+	if err := RegisterTools(registry, service); err != nil {
+		t.Fatalf("register filesystem tools: %v", err)
+	}
+	tool, exists := registry.Lookup("fs.search")
+	if !exists {
+		t.Fatal("search tool is not registered")
+	}
+	result := tool.Execute(context.Background(), tools.Call{Arguments: []byte(`{"query":"needle","path":"docs","glob":"*.md","mode":"literal","case_sensitive":true,"before_lines":0,"after_lines":0,"max_results":10,"include_ignored":false}`)})
+	if result.Status != tools.StatusSucceeded {
+		t.Fatalf("search rejected its declared arguments: %+v", result)
+	}
+}
+
 func writeWorkspaceFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
