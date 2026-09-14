@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/diakovliev/doit/internal/agent"
 	"github.com/diakovliev/doit/internal/cli"
 	"github.com/diakovliev/doit/internal/config"
 	"github.com/diakovliev/doit/internal/policy"
@@ -48,6 +49,28 @@ func TestRunCompletesAgainstDeterministicResponsesBackend(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "repository explained") || !strings.Contains(stdout.String(), "input_tokens=4") {
 		t.Fatalf("unexpected CLI output: %q", stdout.String())
+	}
+}
+
+func TestProgressLineReplacesTerminalStatus(t *testing.T) {
+	var output bytes.Buffer
+	line := &progressLine{writer: &output, enabled: true, replace: true}
+	line.Update(agent.ProgressEvent{Phase: "model", Message: "first action"})
+	line.Update(agent.ProgressEvent{Phase: "tool", Message: "second action"})
+	line.Clear()
+
+	if strings.Contains(output.String(), "\n") || !strings.Contains(output.String(), "\r[doit] tool: second action") {
+		t.Fatalf("expected one replaceable terminal status line: %q", output.String())
+	}
+}
+
+func TestProgressLineKeepsCapturedOutputLineOriented(t *testing.T) {
+	var output bytes.Buffer
+	line := newProgressLine(&output, true)
+	line.Update(agent.ProgressEvent{Phase: "model", Message: "captured action"})
+
+	if output.String() != "[doit] model: captured action\n" {
+		t.Fatalf("unexpected captured progress output: %q", output.String())
 	}
 }
 
