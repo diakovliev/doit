@@ -86,6 +86,7 @@ The initial command surface is:
 
 | Command | Purpose | Example |
 | --- | --- | --- |
+| `doit init` | Create project-local configuration, instruction, and skill templates without contacting a model. Preserve existing files. | `doit init` |
 | `doit` | Start an interactive agent session. This is the default when no command is supplied in a terminal. | `doit` |
 | `doit agent` | Start or resume an interactive agent session explicitly. | `doit agent --resume <session>` |
 | `doit run` | Execute one general-purpose request and exit. Read the request from arguments or stdin. | `doit run -- "explain the current build failure"` |
@@ -100,6 +101,8 @@ The initial command surface is:
 | `doit version` | Print the CLI version and build information. | `doit version` |
 
 `doit run` is the escape hatch for a request that does not fit a named workflow. The workflow commands provide stronger defaults and structured reports; they do not create separate model integrations.
+
+`doit init` is a local setup command. It creates the project-local `.doit` scaffold below the effective invocation path, reports newly created and already existing files, and never loads a backend or opens a model session. Initialization is safe to repeat because it does not overwrite existing files.
 
 The following global options are reserved for consistent behavior across commands:
 

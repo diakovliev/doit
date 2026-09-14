@@ -172,6 +172,10 @@ func validateCommand(invocation *Invocation) error {
 		if len(invocation.Arguments) > 0 {
 			invocation.Request = strings.Join(invocation.Arguments, " ")
 		}
+	case "init":
+		if len(invocation.Arguments) > 0 {
+			return usageError("init does not accept arguments")
+		}
 	case "help", "version":
 		if len(invocation.Arguments) > 0 {
 			return usageError(invocation.Command + " does not accept arguments")
@@ -265,7 +269,7 @@ func writeError(writer io.Writer, err error) {
 func writeHelp(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: doit [global options] <command> [command options] [arguments]")
 	_, _ = fmt.Fprintln(writer, "")
-	_, _ = fmt.Fprintln(writer, "Commands: agent, run, develop, review, test, status, model, config, session, doctor, version")
+	_, _ = fmt.Fprintln(writer, "Commands: init, agent, run, develop, review, test, status, model, config, session, doctor, version")
 	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --format; --ephemeral; --new-session; --timeout")
 }
 

@@ -51,6 +51,30 @@ func TestRunCompletesAgainstDeterministicResponsesBackend(t *testing.T) {
 	}
 }
 
+func TestInitCreatesProjectScaffoldWithoutModel(t *testing.T) {
+	workspace := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := cli.RunWithHandler([]string{"-C", workspace, "init"}, strings.NewReader(""), &stdout, &stderr, Handler{})
+	if status != 0 {
+		t.Fatalf("expected init success, status=%d stderr=%q", status, stderr.String())
+	}
+	for _, path := range []string{
+		".doit/config.json",
+		".doit/instructions.md",
+		".doit/instructions/README.md",
+		".doit/skills/README.md",
+		".doit/skills/example/SKILL.md.template",
+	} {
+		if _, err := os.Stat(filepath.Join(workspace, path)); err != nil {
+			t.Fatalf("expected init file %s: %v", path, err)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Initialized doit") || !strings.Contains(stdout.String(), "created .doit/config.json") {
+		t.Fatalf("unexpected init output: %q", stdout.String())
+	}
+}
+
 func TestPromptApprovalAcceptsExplicitYes(t *testing.T) {
 	var output bytes.Buffer
 	approved, err := promptApproval(context.Background(), bufio.NewReader(strings.NewReader("yes\n")), &output, policy.Action{Name: "code.apply_patch", Risk: tools.RiskWrite}, tools.Call{Arguments: []byte(`{"patch":"..."}`)})

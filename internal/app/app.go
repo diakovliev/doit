@@ -21,6 +21,7 @@ import (
 	"github.com/diakovliev/doit/internal/modelhttp"
 	"github.com/diakovliev/doit/internal/policy"
 	"github.com/diakovliev/doit/internal/processrunner"
+	"github.com/diakovliev/doit/internal/projectinit"
 	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
 	"github.com/diakovliev/doit/internal/usage"
@@ -42,6 +43,9 @@ func (Handler) Agent(ctx context.Context, invocation cli.Invocation, stdin io.Re
 }
 
 func (Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+	if invocation.Command == "init" {
+		return initializeProject(ctx, invocation, stdout)
+	}
 	input := bufio.NewReader(stdin)
 	request, err := requestText(invocation, input, stdout)
 	if err != nil {
@@ -72,6 +76,30 @@ func (Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.
 		return err
 	}
 	return writeOutcome(stdout, configuration.Format, outcome)
+}
+
+func initializeProject(ctx context.Context, invocation cli.Invocation, stdout io.Writer) error {
+	result, err := projectinit.Initialize(ctx, invocation.Directory)
+	if err != nil {
+		return err
+	}
+	if invocation.Format == "json" {
+		return json.NewEncoder(stdout).Encode(result)
+	}
+	if _, err := fmt.Fprintf(stdout, "Initialized doit in %s\n", result.Workspace); err != nil {
+		return err
+	}
+	for _, path := range result.Created {
+		if _, err := fmt.Fprintln(stdout, "created "+path); err != nil {
+			return err
+		}
+	}
+	for _, path := range result.Existing {
+		if _, err := fmt.Fprintln(stdout, "already exists "+path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type runtimeDependencies struct {
