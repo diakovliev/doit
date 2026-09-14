@@ -48,11 +48,13 @@ type ToolCall struct {
 
 // Response is the provider-neutral model response contract.
 type Response struct {
-	ID        string       `json:"id,omitempty"`
-	Status    string       `json:"status"`
-	Text      string       `json:"text,omitempty"`
-	ToolCalls []ToolCall   `json:"tool_calls,omitempty"`
-	Usage     usage.Counts `json:"usage"`
+	ID                string       `json:"id,omitempty"`
+	Status            string       `json:"status"`
+	Text              string       `json:"text,omitempty"`
+	ToolCalls         []ToolCall   `json:"tool_calls,omitempty"`
+	Usage             usage.Counts `json:"usage"`
+	RequestID         string       `json:"request_id,omitempty"`
+	ProviderRequestID string       `json:"provider_request_id,omitempty"`
 }
 
 // ModelClient creates normalized model responses.
