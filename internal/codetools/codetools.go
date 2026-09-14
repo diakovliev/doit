@@ -42,10 +42,11 @@ type PatchRequest struct {
 
 // PatchResponse describes affected paths and preview state.
 type PatchResponse struct {
-	Patch   string   `json:"patch"`
-	Paths   []string `json:"paths"`
-	Applied bool     `json:"applied"`
-	Changed bool     `json:"changed"`
+	Patch     string           `json:"patch"`
+	Paths     []string         `json:"paths"`
+	Applied   bool             `json:"applied"`
+	Changed   bool             `json:"changed"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // CheckPatch validates a patch and returns affected paths without writing.
@@ -65,7 +66,11 @@ func (service *Service) CheckPatch(ctx context.Context, request PatchRequest) (P
 	if err != nil {
 		return PatchResponse{}, err
 	}
-	return PatchResponse{Patch: request.Patch, Paths: paths, Applied: false, Changed: changed}, nil
+	changeSet, err := service.patchChangeSet(operations, "preview")
+	if err != nil {
+		return PatchResponse{}, err
+	}
+	return PatchResponse{Patch: request.Patch, Paths: paths, Applied: false, Changed: changed, ChangeSet: changeSet}, nil
 }
 
 // ApplyPatch validates and atomically applies a patch after the caller's policy check.
@@ -89,7 +94,9 @@ func (service *Service) ApplyPatch(ctx context.Context, request PatchRequest) (P
 	if err := service.applyOperations(root, operations); err != nil {
 		return PatchResponse{}, err
 	}
-	return PatchResponse{Patch: request.Patch, Paths: preview.Paths, Applied: true, Changed: preview.Changed}, nil
+	changeSet := *preview.ChangeSet
+	changeSet.State = "applied"
+	return PatchResponse{Patch: request.Patch, Paths: preview.Paths, Applied: true, Changed: preview.Changed, ChangeSet: &changeSet}, nil
 }
 
 // RenameRequest describes an in-workspace rename.
@@ -160,14 +167,14 @@ func (service *Service) Format(ctx context.Context, request FormatRequest) (Form
 // RegisterTools exposes code operations through the normalized registry.
 func RegisterTools(registry *tools.Registry, service *Service) error {
 	adapters := []toolAdapter{
-		{name: "code.check_patch", description: "Validate a file patch without changing files. Use the exact patch format: *** Update File: path followed by patch lines. Do not wrap the patch in markdown fences.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.check_patch", description: "Validate a file patch without changing files. Use the exact patch format: *** Update File: path followed by patch lines. Do not wrap the patch in markdown fences.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskReadOnly, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.CheckPatch(ctx, request)
 		}},
-		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, changedPaths: patchChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, changedPaths: patchChangedPaths, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -203,6 +210,7 @@ type toolAdapter struct {
 	parameters   string
 	risk         tools.Risk
 	changedPaths func(any) []string
+	changeSet    func(any) *tools.ChangeSet
 	execute      func(context.Context, tools.Call) (any, error)
 }
 
@@ -218,6 +226,9 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	result := tools.Result{Status: tools.StatusSucceeded, Data: data}
 	if adapter.changedPaths != nil {
 		result.ChangedPaths = adapter.changedPaths(data)
+	}
+	if adapter.changeSet != nil {
+		result.ChangeSet = adapter.changeSet(data)
 	}
 	return result
 }
@@ -236,6 +247,14 @@ func renameChangedPaths(data any) []string {
 		return nil
 	}
 	return []string{response.From, response.To}
+}
+
+func patchChangeSetFromData(data any) *tools.ChangeSet {
+	response, ok := data.(PatchResponse)
+	if !ok {
+		return nil
+	}
+	return response.ChangeSet
 }
 
 type patchOperation struct {
@@ -401,6 +420,71 @@ func (service *Service) patchChanged(operations []patchOperation) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+func (service *Service) patchChangeSet(operations []patchOperation, state string) (*tools.ChangeSet, error) {
+	root, err := os.OpenRoot(service.workspace)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "codetools.change_set", err)
+	}
+	defer func() { _ = root.Close() }()
+	paths := make([]string, 0, len(operations))
+	beforeHashes := make(map[string]string, len(operations))
+	afterHashes := make(map[string]string, len(operations))
+	for _, operation := range operations {
+		path, pathErr := service.scopedPath(operation.path)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		before, beforeExists, readErr := readSnapshot(root, path)
+		if readErr != nil {
+			return nil, apperr.Wrap(apperr.KindTool, "codetools.change_set", readErr)
+		}
+		beforeHashes[path] = snapshotHash(before, beforeExists)
+		var after []byte
+		afterExists := !operation.delete
+		if afterExists {
+			content, contentErr := operationContent(root, path, operation)
+			if contentErr != nil {
+				return nil, contentErr
+			}
+			after = []byte(content)
+		}
+		afterHashes[path] = snapshotHash(after, afterExists)
+		paths = append(paths, path)
+	}
+	changeSet := &tools.ChangeSet{Operation: "code.apply_patch", State: state, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes}
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: changeSet.Operation, Paths: changeSet.Paths, BeforeHashes: changeSet.BeforeHashes, AfterHashes: changeSet.AfterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "codetools.change_set", err)
+	}
+	digest := sha256.Sum256(identity)
+	changeSet.ID = hex.EncodeToString(digest[:])
+	return changeSet, nil
+}
+
+func readSnapshot(root *os.Root, path string) ([]byte, bool, error) {
+	content, err := root.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return content, true, nil
+}
+
+func snapshotHash(content []byte, exists bool) string {
+	if !exists {
+		return ""
+	}
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 func (service *Service) operationChanged(root *os.Root, operation patchOperation) (bool, error) {

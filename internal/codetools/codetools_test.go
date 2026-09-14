@@ -11,17 +11,40 @@ import (
 func TestPatchPreviewAndApply(t *testing.T) {
 	root, service := newCodeService(t)
 	patch := "*** Update File: file.txt\n+new\n"
+	preview := requirePatchPreview(t, service, patch)
+	result := requirePatchApply(t, service, patch)
+	assertPatchChangeSet(t, preview, result)
+	contents := readCodeFixture(t, root)
+	if string(contents) != "new\n" {
+		t.Fatalf("unexpected file content: %q", contents)
+	}
+}
+
+func requirePatchPreview(t *testing.T, service *Service, patch string) PatchResponse {
+	t.Helper()
 	preview, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch, DryRun: true})
-	if err != nil || preview.Applied || !preview.Changed {
+	if err != nil || preview.Applied || !preview.Changed || preview.ChangeSet == nil || preview.ChangeSet.State != "preview" {
 		t.Fatalf("unexpected preview: %+v, error=%v", preview, err)
 	}
+	return preview
+}
+
+func requirePatchApply(t *testing.T, service *Service, patch string) PatchResponse {
+	t.Helper()
 	result, err := service.ApplyPatch(context.Background(), PatchRequest{Patch: patch})
-	if err != nil || !result.Applied {
+	if err != nil || !result.Applied || result.ChangeSet == nil || result.ChangeSet.State != "applied" {
 		t.Fatalf("unexpected apply result: %+v, error=%v", result, err)
 	}
-	contents := readCodeFixture(t, root)
-	if err != nil || string(contents) != "new\n" {
-		t.Fatalf("unexpected file content: %q, error=%v", contents, err)
+	return result
+}
+
+func assertPatchChangeSet(t *testing.T, preview, result PatchResponse) {
+	t.Helper()
+	if result.ChangeSet.ID != preview.ChangeSet.ID {
+		t.Fatalf("preview/apply change-set IDs differ: %q != %q", preview.ChangeSet.ID, result.ChangeSet.ID)
+	}
+	if result.ChangeSet.BeforeHashes["file.txt"] == "" || result.ChangeSet.AfterHashes["file.txt"] == "" || result.ChangeSet.BeforeHashes["file.txt"] == result.ChangeSet.AfterHashes["file.txt"] {
+		t.Fatalf("unexpected change-set hashes: %+v", result.ChangeSet)
 	}
 }
 
