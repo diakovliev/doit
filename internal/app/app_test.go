@@ -75,6 +75,27 @@ func TestInitCreatesProjectScaffoldWithoutModel(t *testing.T) {
 	}
 }
 
+func TestTestCommandRunsConfiguredTaskWithoutModel(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	workspace := t.TempDir()
+	doitDirectory := filepath.Join(workspace, ".doit")
+	if err := os.MkdirAll(doitDirectory, 0700); err != nil {
+		t.Fatalf("make doit directory: %v", err)
+	}
+	configuration := `{"tasks":{"probe":{"executable":"git","arguments":["--version"],"kind":"test"}}}`
+	if err := os.WriteFile(filepath.Join(doitDirectory, "config.json"), []byte(configuration), 0600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := cli.RunWithHandler([]string{"-C", workspace, "test", "probe"}, strings.NewReader(""), &stdout, &stderr, Handler{})
+	if status != 0 || !strings.Contains(stdout.String(), "passed=true") {
+		t.Fatalf("configured test command failed: status=%d stdout=%q stderr=%q", status, stdout.String(), stderr.String())
+	}
+}
+
 func TestPromptApprovalAcceptsExplicitYes(t *testing.T) {
 	var output bytes.Buffer
 	approved, err := promptApproval(context.Background(), bufio.NewReader(strings.NewReader("yes\n")), &output, policy.Action{Name: "code.apply_patch", Risk: tools.RiskWrite}, tools.Call{Arguments: []byte(`{"patch":"..."}`)})
