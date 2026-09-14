@@ -144,7 +144,7 @@ func TestGitLocalMutationsAreWorkspaceScoped(t *testing.T) {
 		t.Fatalf("new service: %v", err)
 	}
 	commit := commitGitFixtureChange(t, service)
-	if commit.Hash == "" {
+	if commit.Hash == "" || commit.ChangeSet == nil || commit.ChangeSet.Operation != "git.commit" {
 		t.Fatalf("commit did not return a hash: %+v", commit)
 	}
 	restoreGitFixtureChange(t, service, root)

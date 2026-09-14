@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,13 +515,18 @@ type StageRequest struct {
 
 // StageResponse describes paths added to the index.
 type StageResponse struct {
-	Paths  []string `json:"paths"`
-	Staged []string `json:"staged"`
+	Paths     []string         `json:"paths"`
+	Staged    []string         `json:"staged"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Stage adds explicitly selected workspace paths to the index.
 func (service *Service) Stage(ctx context.Context, request StageRequest) (StageResponse, error) {
 	paths, err := service.mutationPaths(request.Paths, "gitinspect.stage")
+	if err != nil {
+		return StageResponse{}, err
+	}
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return StageResponse{}, err
 	}
@@ -530,7 +537,15 @@ func (service *Service) Stage(ctx context.Context, request StageRequest) (StageR
 	if err != nil {
 		return StageResponse{}, err
 	}
-	return StageResponse{Paths: paths, Staged: staged}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return StageResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.stage", "applied", paths, before, after)
+	if err != nil {
+		return StageResponse{}, err
+	}
+	return StageResponse{Paths: paths, Staged: staged, ChangeSet: changeSet}, nil
 }
 
 // UnstageRequest selects workspace paths to remove from the index.
@@ -540,7 +555,8 @@ type UnstageRequest struct {
 
 // UnstageResponse describes paths removed from the index.
 type UnstageResponse struct {
-	Paths []string `json:"paths"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Unstage removes explicitly selected workspace paths from the index.
@@ -549,11 +565,23 @@ func (service *Service) Unstage(ctx context.Context, request UnstageRequest) (Un
 	if err != nil {
 		return UnstageResponse{}, err
 	}
+	before, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
 	arguments := append([]string{"reset", "--"}, paths...)
 	if _, err := service.run(ctx, arguments...); err != nil {
 		return UnstageResponse{}, err
 	}
-	return UnstageResponse{Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.unstage", "applied", paths, before, after)
+	if err != nil {
+		return UnstageResponse{}, err
+	}
+	return UnstageResponse{Paths: paths, ChangeSet: changeSet}, nil
 }
 
 // CommitRequest creates a commit from explicitly selected staged paths.
@@ -564,21 +592,34 @@ type CommitRequest struct {
 
 // CommitResponse describes the created commit.
 type CommitResponse struct {
-	Hash    string   `json:"hash"`
-	Message string   `json:"message"`
-	Paths   []string `json:"paths"`
+	Hash      string           `json:"hash"`
+	Message   string           `json:"message"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Commit stages and commits only the explicitly selected workspace paths.
 func (service *Service) Commit(ctx context.Context, request CommitRequest) (CommitResponse, error) {
 	message := strings.TrimSpace(request.Message)
+	paths, err := service.commitPaths(request.Paths, message)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	return service.commitPathsWithMessage(ctx, paths, message)
+}
+
+func (service *Service) commitPaths(paths []string, message string) ([]string, error) {
 	if message == "" {
-		return CommitResponse{}, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message is required")
+		return nil, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message is required")
 	}
 	if len(message) > 2000 {
-		return CommitResponse{}, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message exceeds 2000 bytes")
+		return nil, apperr.New(apperr.KindUsage, "gitinspect.commit", "commit message exceeds 2000 bytes")
 	}
-	paths, err := service.mutationPaths(request.Paths, "gitinspect.commit")
+	return service.mutationPaths(paths, "gitinspect.commit")
+}
+
+func (service *Service) commitPathsWithMessage(ctx context.Context, paths []string, message string) (CommitResponse, error) {
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return CommitResponse{}, err
 	}
@@ -600,7 +641,15 @@ func (service *Service) Commit(ctx context.Context, request CommitRequest) (Comm
 	if err != nil {
 		return CommitResponse{}, err
 	}
-	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.commit", "applied", paths, before, after)
+	if err != nil {
+		return CommitResponse{}, err
+	}
+	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths, ChangeSet: changeSet}, nil
 }
 
 // RestoreRequest selects paths and the local state to restore.
@@ -611,13 +660,18 @@ type RestoreRequest struct {
 
 // RestoreResponse describes paths restored from the index or HEAD.
 type RestoreResponse struct {
-	Mode  string   `json:"mode"`
-	Paths []string `json:"paths"`
+	Mode      string           `json:"mode"`
+	Paths     []string         `json:"paths"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Restore restores selected worktree or index paths using fixed local modes.
 func (service *Service) Restore(ctx context.Context, request RestoreRequest) (RestoreResponse, error) {
 	paths, err := service.mutationPaths(request.Paths, "gitinspect.restore")
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	before, err := service.mutationStateHashes(ctx, paths)
 	if err != nil {
 		return RestoreResponse{}, err
 	}
@@ -636,7 +690,15 @@ func (service *Service) Restore(ctx context.Context, request RestoreRequest) (Re
 	if _, err := service.run(ctx, arguments...); err != nil {
 		return RestoreResponse{}, err
 	}
-	return RestoreResponse{Mode: request.Mode, Paths: paths}, nil
+	after, err := service.mutationStateHashes(ctx, paths)
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	changeSet, err := gitChangeSet("git.restore", "applied", paths, before, after)
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	return RestoreResponse{Mode: request.Mode, Paths: paths, ChangeSet: changeSet}, nil
 }
 
 func (service *Service) stagedPaths(ctx context.Context, paths []string) ([]string, error) {
@@ -658,6 +720,42 @@ func (service *Service) stagePaths(ctx context.Context, paths []string) error {
 	arguments := append([]string{"add", "--"}, paths...)
 	_, err := service.run(ctx, arguments...)
 	return err
+}
+
+func (service *Service) mutationStateHashes(ctx context.Context, paths []string) (map[string]string, error) {
+	hashes := make(map[string]string, len(paths))
+	for _, path := range paths {
+		status, err := service.run(ctx, "status", "--porcelain=v1", "-z", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		worktree, err := service.run(ctx, "diff", "--name-status", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		index, err := service.run(ctx, "diff", "--cached", "--name-status", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		state := status + "\x00" + worktree + "\x00" + index
+		digest := sha256.Sum256([]byte(state))
+		hashes[path] = hex.EncodeToString(digest[:])
+	}
+	return hashes, nil
+}
+
+func gitChangeSet(operation, state string, paths []string, beforeHashes, afterHashes map[string]string) (*tools.ChangeSet, error) {
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: operation, Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "gitinspect.change_set", err)
+	}
+	digest := sha256.Sum256(identity)
+	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: operation, State: state, Paths: append([]string(nil), paths...), BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
 }
 
 func (service *Service) noSelectedChangesError(ctx context.Context, paths []string) error {
@@ -767,28 +865,28 @@ func gitReadAdapters(service *Service) []toolAdapter {
 
 func gitMutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.stage", description: "Stage explicit workspace paths for a later commit.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.stage", description: "Stage explicit workspace paths for a later commit.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Stage(ctx, request)
 		}},
-		{name: "git.unstage", description: "Remove explicit workspace paths from the Git index without changing files.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.unstage", description: "Remove explicit workspace paths from the Git index without changing files.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request UnstageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Unstage(ctx, request)
 		}},
-		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Validate the selected diff before calling this tool.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Validate the selected diff before calling this tool.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request CommitRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Commit(ctx, request)
 		}},
-		{name: "git.restore", description: "Restore explicit paths from the index, worktree, or HEAD. This can discard local changes.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"}}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.restore", description: "Restore explicit paths from the index, worktree, or HEAD. This can discard local changes.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"}}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RestoreRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -804,6 +902,7 @@ type toolAdapter struct {
 	parameters   string
 	risk         tools.Risk
 	changedPaths func(any) []string
+	changeSet    func(any) *tools.ChangeSet
 	execute      func(context.Context, tools.Call) (any, error)
 }
 
@@ -820,6 +919,9 @@ func (adapter toolAdapter) Execute(ctx context.Context, call tools.Call) tools.R
 	if adapter.changedPaths != nil {
 		result.ChangedPaths = adapter.changedPaths(data)
 	}
+	if adapter.changeSet != nil {
+		result.ChangeSet = adapter.changeSet(data)
+	}
 	return result
 }
 
@@ -835,6 +937,19 @@ func (response StageResponse) changedPaths() []string   { return response.Paths 
 func (response UnstageResponse) changedPaths() []string { return response.Paths }
 func (response CommitResponse) changedPaths() []string  { return response.Paths }
 func (response RestoreResponse) changedPaths() []string { return response.Paths }
+
+func gitChangeSetFromData(data any) *tools.ChangeSet {
+	response, ok := data.(interface{ gitChangeSet() *tools.ChangeSet })
+	if !ok {
+		return nil
+	}
+	return response.gitChangeSet()
+}
+
+func (response StageResponse) gitChangeSet() *tools.ChangeSet   { return response.ChangeSet }
+func (response UnstageResponse) gitChangeSet() *tools.ChangeSet { return response.ChangeSet }
+func (response CommitResponse) gitChangeSet() *tools.ChangeSet  { return response.ChangeSet }
+func (response RestoreResponse) gitChangeSet() *tools.ChangeSet { return response.ChangeSet }
 
 func (service *Service) scopedPath(path string) (string, error) {
 	if path == "" {

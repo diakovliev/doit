@@ -108,21 +108,51 @@ func TestRejectsWorkspaceEscape(t *testing.T) {
 
 func TestMkdirAndRemoveDirectoryTree(t *testing.T) {
 	root := t.TempDir()
+	service := newWorkspaceService(t, root)
+	createNestedDirectory(t, service, root)
+	assertNonRecursiveRemoveFails(t, service)
+	removed := removeNestedDirectory(t, service)
+	assertRemovedDirectory(t, removed, root)
+}
+
+func newWorkspaceService(t *testing.T, root string) *Service {
+	t.Helper()
 	service, err := New(root)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	return service
+}
+
+func createNestedDirectory(t *testing.T, service *Service, root string) {
+	t.Helper()
 	created, err := service.Mkdir(context.Background(), MkdirRequest{Path: "nested/dir", Parents: true})
-	if err != nil || created.Path != "nested/dir" {
+	if err != nil || created.Path != "nested/dir" || created.ChangeSet == nil {
 		t.Fatalf("unexpected mkdir response: %+v, error=%v", created, err)
 	}
 	writeWorkspaceFile(t, filepath.Join(root, "nested", "dir", "file.txt"), "content")
+}
+
+func assertNonRecursiveRemoveFails(t *testing.T, service *Service) {
+	t.Helper()
 	if _, err := service.Remove(context.Background(), RemoveRequest{Path: "nested/dir"}); err == nil {
 		t.Fatal("expected non-recursive directory removal to fail")
 	}
+}
+
+func removeNestedDirectory(t *testing.T, service *Service) RemoveResponse {
+	t.Helper()
 	removed, err := service.Remove(context.Background(), RemoveRequest{Path: "nested", Recursive: true})
-	if err != nil || removed.Path != "nested" || !removed.Recursive {
+	if err != nil || removed.Path != "nested" || !removed.Recursive || removed.ChangeSet == nil {
 		t.Fatalf("unexpected remove response: %+v, error=%v", removed, err)
+	}
+	return removed
+}
+
+func assertRemovedDirectory(t *testing.T, removed RemoveResponse, root string) {
+	t.Helper()
+	if removed.ChangeSet.BeforeHashes["nested"] == "" || removed.ChangeSet.AfterHashes["nested"] != "" {
+		t.Fatalf("unexpected remove change set: %+v", removed.ChangeSet)
 	}
 	if _, err := os.Stat(filepath.Join(root, "nested")); !os.IsNotExist(err) {
 		t.Fatalf("directory tree still exists: %v", err)
@@ -156,19 +186,43 @@ func TestWriteProvidesChangeSet(t *testing.T) {
 
 func writeAndMoveFile(t *testing.T, service *Service) {
 	t.Helper()
+	writeInitialFile(t, service)
+	assertOverwriteProtection(t, service)
+	writeReplacementFile(t, service)
+	assertMoveFile(t, service)
+}
+
+func writeInitialFile(t *testing.T, service *Service) {
+	t.Helper()
 	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "first", Parents: true})
 	if err != nil || !written.Created || written.Bytes != 5 {
 		t.Fatalf("unexpected write response: %+v, error=%v", written, err)
 	}
+}
+
+func assertOverwriteProtection(t *testing.T, service *Service) {
+	t.Helper()
 	if _, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second"}); err == nil {
 		t.Fatal("expected overwrite protection")
 	}
-	written, err = service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second", Overwrite: true})
+}
+
+func writeReplacementFile(t *testing.T, service *Service) {
+	t.Helper()
+	written, err := service.Write(context.Background(), WriteRequest{Path: "nested/file.txt", Content: "second", Overwrite: true})
 	if err != nil || !written.Overwrote {
 		t.Fatalf("unexpected overwrite response: %+v, error=%v", written, err)
 	}
-	if _, err := service.Move(context.Background(), MoveRequest{From: "nested/file.txt", To: "nested/moved.txt"}); err != nil {
+}
+
+func assertMoveFile(t *testing.T, service *Service) {
+	t.Helper()
+	moved, err := service.Move(context.Background(), MoveRequest{From: "nested/file.txt", To: "nested/moved.txt"})
+	if err != nil || moved.ChangeSet == nil {
 		t.Fatalf("move file: %v", err)
+	}
+	if moved.ChangeSet.BeforeHashes["nested/file.txt"] == "" || moved.ChangeSet.AfterHashes["nested/file.txt"] != "" || moved.ChangeSet.AfterHashes["nested/moved.txt"] == "" {
+		t.Fatalf("unexpected move change set: %+v", moved.ChangeSet)
 	}
 }
 
@@ -224,6 +278,11 @@ func TestRegisterTools(t *testing.T) {
 		if !exists || len(tool.Definition().Parameters) == 0 {
 			t.Fatalf("directory tool is not registered with a schema: %s", name)
 		}
+	}
+	mkdirTool, _ := registry.Lookup("fs.mkdir")
+	result := mkdirTool.Execute(context.Background(), tools.Call{Arguments: []byte(`{"path":"adapter-dir"}`)})
+	if result.Status != tools.StatusSucceeded || result.ChangeSet == nil || result.ChangeSet.Operation != "fs.mkdir" {
+		t.Fatalf("filesystem adapter did not expose change set: %+v", result)
 	}
 }
 
