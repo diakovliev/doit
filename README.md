@@ -322,7 +322,7 @@ Filesystem inspection:
 - `fs.mkdir`
 - `fs.remove`
 
-Use `fs.list` to inspect the workspace tree, `fs.write` to create or explicitly overwrite bounded files, `fs.move` to move files or directories without replacement, `fs.mkdir` with `parents: true` to create nested directories, and `fs.remove` with `recursive: true` only when removing a directory tree is intended. All mutation tools are workspace-confined; the workspace root and `.git` metadata are protected. Use `code.apply_patch` for larger reviewable file changes. Agent mode asks for approval, while `doit run` can automate local workspace changes.
+Use `fs.list` to inspect the workspace tree; pass a relative `path` such as `docs` and `recursive: true` to enumerate a subtree. Use `fs.search` with the same relative `path` and an optional glob such as `*.md` to search within that subtree. Use `fs.write` to create or explicitly overwrite bounded files, `fs.move` to move files or directories without replacement, `fs.mkdir` with `parents: true` to create nested directories, and `fs.remove` with `recursive: true` only when removing a directory tree is intended. All mutation tools are workspace-confined; the workspace root and `.git` metadata are protected. Use `code.apply_patch` for larger reviewable file changes. Agent mode asks for approval, while `doit run` can automate local workspace changes.
 
 Git inspection and local operations:
 
