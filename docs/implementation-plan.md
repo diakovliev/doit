@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Phase 5 protocol extensions complete; cloud synchronization is out of scope
+**Status:** Phase 6 session context and retrieval complete; cloud synchronization is out of scope
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -200,6 +200,12 @@ Deferred work must not change the approval, observability, token accounting, ses
 
 Cloud synchronization, hosted analytics, and cloud persistence are explicitly out of scope and must not be added as implementation tasks. General plugin architecture remains undecided; MCP is the preferred extension boundary for external tools.
 
+## Phase 6: Session Context and Retrieval
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `SESSION-003` | Bound cumulative session usage and add model-visible bounded session history retrieval. | `SESSION-001`, `SESSION-002`, `CONTEXT-001`, `AGENT-002`, `HARD-004` | `max_input_tokens` remains a per-request context bound; `max_session_tokens` is propagated and enforced across all model rounds; recent resume history remains pair-safe; `session.history` searches only the active redacted session with event, cursor, event-count, and byte limits; continuation state, secrets, raw session files, and other sessions remain inaccessible; the active-session context hook is ready for future remote workspace-lease binding; focused tests cover budget exhaustion, history filtering, truncation, and cancellation. | `DONE` |
+
 ## Progress Log
 
 | Date | Task ID | Change | Evidence |
@@ -272,3 +278,5 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | 2026-09-14 | `MCP-001` | Added official MCP SDK integration with configured stdio and opt-in streamable HTTP transports, namespaced tool discovery, bounded normalized results, structured change-set propagation, conservative annotation handling, network policy metadata, cancellation, and runtime lifecycle cleanup. | In-memory MCP integration/config tests; full repository validation matrix passed |
 | 2026-09-14 | `TOOL-001`, `TOOL-009` | Fixed the model-facing `fs.list` schema so nested workspace paths expose `path`, recursion, depth, entry, and ignore controls; clarified scoped `fs.search` behavior and added nested `docs/` listing/search regressions. | Focused workspacefs regression and full repository validation matrix passed |
 | 2026-09-14 | `TOOL-001`, `TOOL-009` | Aligned the normalized `fs.search` argument limit with its nine-field schema so complete scoped searches are not rejected by the central tool contract. | Focused full-argument `fs.search` regression and full repository validation matrix passed |
+| 2026-09-14 | `SESSION-003` | Defined the three session bounds: per-request input context, cumulative model usage, and bounded transcript retrieval. Specified the active-session-only `session.history` model tool with redaction, cursors, event filters, output limits, and remote workspace-lease scoping. | Design recorded in [design.md](design.md); implementation pending |
+| 2026-09-14 | `SESSION-003` | Implemented cumulative session-token reservation and enforcement, active-session-scoped `session.history`, bounded store queries, cursor/event filtering, cancellation handling, and persisted budget-failure usage evidence. | Focused session/agent tests and full repository validation matrix passed |
