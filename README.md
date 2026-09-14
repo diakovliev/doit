@@ -200,6 +200,8 @@ DOIT_API_KEY_ENV
 DOIT_EPHEMERAL
 ```
 
+The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
+
 Configuration precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, and command-line flags.
 
 ## Ollama in Docker
@@ -309,8 +311,10 @@ Git inspection and local operations:
 - `git.unstage`
 - `git.commit`
 - `git.restore`
+- `git.branch`
+- `git.worktree`
 
-Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. Agent mode asks for approval; `doit run` can automate these local operations. Remote operations and arbitrary Git command composition are not exposed.
+Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
 
 Code and validation:
 
@@ -337,7 +341,7 @@ The model-facing schema advertises the tasks available in the current workspace.
 
 The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
-Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is the automation path: it allows local workspace changes and configured process tasks without prompting, while tool-level path confinement, network rejection, and command allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
+Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is trusted workspace automation: configured operations inside the effective workspace, including destructive local changes, run without prompting. The resulting diff, change request, validation output, and session evidence are the human review surface; workspace boundaries, symlink checks, and configured capability allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
 
 Example approval flow:
 
