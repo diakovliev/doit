@@ -294,7 +294,17 @@ A normalized result has this conceptual shape:
     "data": {},
     "diagnostics": [],
     "changed_paths": [],
-    "truncated": false
+    "truncated": false,
+    "duration": "25ms",
+    "change_set": {
+        "id": "stable-content-hash",
+        "operation": "code.apply_patch",
+        "state": "preview",
+        "approval": "workspace-automation",
+        "paths": ["internal/example.go"],
+        "before_hashes": {"internal/example.go": "..."},
+        "after_hashes": {"internal/example.go": "..."}
+    }
 }
 ```
 
@@ -343,7 +353,7 @@ Git inspection must report the repository root when it differs from the effectiv
 
 - `process.run`: Execute a named repository-configured task such as `check`, `format`, `lint`, `analyze`, `security`, or `build`, with structured arguments, a working directory, timeout, environment allowlist, and output limit. Its schema advertises the task names registered for the current environment; the model must select a task name rather than compose an executable or shell command. Provider-safe `process_run` names are mapped back to the local `process.run` capability.
 
-The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns exit status, duration, bounded stdout and stderr, and timeout information.
+The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns task kind, pass/fail state, exit status, duration, bounded stdout and stderr, timeout/truncation state, and bounded file/line diagnostics when its output follows a recognized diagnostic format.
 
 The project configuration may set `tool_profile` to `full`, `inspect`, `edit`, `validate`, `git-read`, `git-write`, or `destructive`. A profile limits which registered capabilities are offered to the model; it does not weaken workspace scope checks or authorize capabilities that are not registered.
 
