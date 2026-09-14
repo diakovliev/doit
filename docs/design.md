@@ -100,7 +100,7 @@ The initial command surface is:
 | `doit doctor` | Run local diagnostics for configuration, credentials, workspace access, and required tools. | `doit doctor` |
 | `doit version` | Print the CLI version and build information. | `doit version` |
 
-`doit run` is the escape hatch for a request that does not fit a named workflow. The workflow commands provide stronger defaults and structured reports; they do not create separate model integrations.
+`doit run` is the escape hatch for a request that does not fit a named workflow. `doit develop` enables trusted workspace automation for a focused development request, while `doit review` keeps the model in read-oriented mode. `doit test`, `doit status`, `doit model test`, `doit config list`, `doit session`, and `doit doctor` provide local structured workflows without inventing separate model integrations.
 
 `doit init` is a local setup command. It creates the project-local `.doit` scaffold below the effective invocation path, reports newly created and already existing files, and never loads a backend or opens a model session. Initialization is safe to repeat because it does not overwrite existing files.
 
@@ -333,7 +333,7 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
 - `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
-All code writes must produce a diff or changed-path summary before completion. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch.
+All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch operations must support pre-apply preview and conflict validation; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
 
 **Git inspection** is first-class and must not be implemented by asking the model to compose arbitrary Git commands:
 
@@ -366,6 +366,8 @@ Local Git mutations are first-class workspace tools with structured arguments an
 - `git.restore`: Restore explicitly selected paths from the index or `HEAD`; worktree restoration is destructive.
 
 `doit agent` confirms these operations individually. `doit run` is trusted workspace automation and may execute configured local Git operations, including destructive ones, without an interactive prompt; path confinement, Git validation, and review artifacts remain active. Push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, and remote management require separate capabilities and are not implied by local workspace authorization.
+
+Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials.
 
 ### 4.6 Approval and Safety Policy
 

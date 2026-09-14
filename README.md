@@ -105,11 +105,19 @@ Implemented command paths:
 | `doit` | Start the default agent request flow. |
 | `doit agent` | Run an agent request, reading a prompt from stdin when no prompt argument is supplied. |
 | `doit run <request>` | Run one development-oriented request and exit. |
+| `doit develop <request>` | Run a trusted workspace development request with local automation enabled. |
+| `doit review <request>` | Run a read-oriented review request without enabling workspace mutations. |
+| `doit test [task]` | Run a configured validation task directly, defaulting to `test`. |
+| `doit status` | Report the effective workspace, selected profiles, and Git state. |
+| `doit model test` | Send a minimal request to the selected backend and report normalized response metadata. |
+| `doit config list` | Print the effective non-secret configuration. |
+| `doit session list|inspect|export|resume|prune` | Inspect, resume, export, or prune project-local sessions. |
+| `doit doctor` | Run local workspace, configuration, and profile diagnostics. |
 | `doit --help` | Print CLI usage. Put `--help` before the command. |
 | `doit --version` | Print the CLI version. |
 | `doit version` | Print the CLI version. |
 
-The following names are recognized for future workflow implementations: `develop`, `review`, `test`, `status`, `model`, `config`, `session`, and `doctor`. Use `run` for the current general-purpose workflow.
+Use `run` for a general-purpose request, `develop` for trusted workspace automation, and `review` for read-oriented analysis. The local diagnostic commands do not create model sessions unless explicitly documented above.
 
 Initialize a workspace before adding project-specific guidance:
 
