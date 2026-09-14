@@ -181,7 +181,7 @@ Repository guidance discovery is an explicit allowlist. It reads `.github/copilo
 Session context uses three independent bounds:
 
 - `max_input_tokens` limits the serialized context of one model request, including instructions, tools, retained history, current input, and tool results. The context builder must fit this budget before every request and remove function-call/function-call-output pairs atomically.
-- `max_session_tokens` limits cumulative model usage for the session. It includes finalized input and output usage for every model round, including follow-up rounds after tool calls. The orchestrator must refuse the next model request once the budget is exhausted and persist the budget failure in session evidence.
+- `max_session_tokens` sets a cumulative model-usage threshold for the session. It includes finalized input and output usage for every model round, including follow-up rounds after tool calls. Reaching the threshold emits a session diagnostic and keeps the model informed that context is bounded; it does not terminate an otherwise valid tool loop. The hard execution bounds remain the per-request input budget, maximum round count, caller deadline, tool limits, and cancellation.
 - Session transcript limits bound durable event size and model-visible history results. A bounded event is not permission to return an unbounded collection of events.
 
 The default request context contains a recent coherent history window. Older history is available through a dedicated read-only model tool named `session.history`; it must not be exposed through `fs.read` or by allowing the model to read `.doit/sessions/` directly.
@@ -264,7 +264,7 @@ The accounting sequence is:
 4. Reconcile the final counters with the provider's `usage` object when one is returned. Provider values replace estimates for that request.
 5. Add the finalized request counters to the cumulative session counters and write them to the session result.
 
-The cumulative session counter is a hard execution budget, not the same thing as the per-request context window. A session can have a small request context and still exhaust its cumulative model budget after many tool rounds. Conversely, a large durable transcript does not automatically become model context; it is accessed only through bounded retrieval.
+The cumulative session counter is an accounting and warning threshold, not the same thing as the per-request context window. A session can have a small request context and cross its cumulative usage threshold after many tool rounds while continuing under the hard round and deadline limits. Conversely, a large durable transcript does not automatically become model context; it is accessed only through bounded retrieval.
 
 The adapter should preserve provider details when available, including cached input tokens and reasoning output tokens. Tool results are not output tokens; they become input on the next model request. Retries are separate model attempts and must not be silently collapsed into one usage record.
 
