@@ -1,5 +1,5 @@
 {
-  "default_profile": "foundry",
+  "default_profile": "foundry_gpt",
   "profiles": {
     "lmstudio": {
       "api_root": "http://localhost:1234/v1",

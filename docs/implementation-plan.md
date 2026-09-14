@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Status:** Phase 4 complete; provider extensions and later workflow expansion remain deferred
+**Status:** Phase 5 protocol extensions complete; cloud synchronization is out of scope
 
 This plan turns [design.md](design.md) into trackable work. It covers the Safe Local MVP first and leaves provider extensions, remote Git operations, and cloud features out of the critical path.
 
@@ -54,7 +54,7 @@ These decisions are frozen for the Safe Local MVP on 2026-09-12. Changes require
 
 - Core compatibility requires non-streaming `POST {api_root}/responses` with text input, text output, client-defined function tools, `function_call` output items, and `function_call_output` follow-up items.
 - The client manages conversation state locally. Provider-managed state, hosted tools, multimodal input, and structured output are optional capabilities.
-- Streaming is not required for the Phase 1 MVP. `MODEL-002` may add SSE support after the non-streaming path is stable; non-streaming fallback remains mandatory.
+- Streaming is not required for the Phase 1 MVP. `MODEL-002` is scheduled for Phase 5 alongside MCP support; non-streaming fallback remains mandatory.
 
 #### `DEC-002` Configuration
 
@@ -185,13 +185,20 @@ These items are intentionally outside the MVP critical path:
 
 - `DEFER-001`: Native adapters for APIs that do not satisfy the OpenAI Responses compatibility contract.
 - `DEFER-002`: Multimodal input and provider-hosted tools.
-- `DEFER-003`: Remote MCP integrations.
 - `DEFER-004`: Git push, merge, force-push, history rewriting, and remote management.
-- `DEFER-005`: Cloud session synchronization and hosted analytics.
-- `DEFER-006`: Plugin or external tool extension protocols.
+- `DEFER-006`: General plugin or external extension protocols remain undecided; do not implement or design around them until the MCP boundary has been evaluated.
 - `DEFER-007`: Additional interactive UI frontends and automatic model discovery.
 
 Deferred work must not change the approval, observability, token accounting, session redaction, or deterministic validation boundaries established by the MVP.
+
+## Phase 5: Protocol Extensions
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `MODEL-002` | Add optional OpenAI Responses SSE streaming. | `MODEL-001`, `DEC-009`, `HARD-002` | SSE deltas, terminal completion/failure events, cancellation, partial output, request/provider IDs, and usage reconciliation produce the same normalized outcome contract as non-streaming requests, with mandatory fallback. | `DONE` |
+| `MCP-001` | Support explicitly configured MCP tool servers. | `HARD-003`, `HARD-004`, `AGENT-003` | MCP tool definitions and results map into the normalized contract; server transport, network effects, tool capabilities, timeouts, output bounds, redaction, change-set evidence, and trusted workspace automation policy are enforced and tested. | `DONE` |
+
+Cloud synchronization, hosted analytics, and cloud persistence are explicitly out of scope and must not be added as implementation tasks. General plugin architecture remains undecided; MCP is the preferred extension boundary for external tools.
 
 ## Progress Log
 
@@ -259,3 +266,7 @@ Deferred work must not change the approval, observability, token accounting, ses
 | 2026-09-14 | `HARD-002` | Exposed generated client request IDs and provider `X-Request-Id`/`Request-Id` values in normalized model responses so session model events retain operational correlation data. | Focused model HTTP tests passed |
 | 2026-09-14 | `TOOL-008`, `HARD-002` | Completed the current Phase 4 slice for persisted change-set/validation evidence and request correlation. | `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, `gosec ./...`, and `git diff --check` all passed |
 | 2026-09-14 | `WORK-001`, `WORK-002`, `WORK-003` | Completed the Phase 4 command and delivery surface: develop/review/test workflows, status/config/model/doctor diagnostics, session list/inspect/export/resume/prune, and GitHub Actions CI. | Focused CLI/app/agent/session tests passed; full local validation matrix passed |
+| 2026-09-14 | `PLAN-004` | Product decision: cloud synchronization and hosted analytics are permanently out of scope; MCP is the planned external-tool interoperability boundary; general plugins remain undecided. | User decision; `MCP-001` added as the next protocol-extension task |
+| 2026-09-14 | `PLAN-005` | Scheduled optional Responses SSE streaming in Phase 5 alongside MCP; non-streaming remains the required fallback. | User decision; `MODEL-002` added to Phase 5 |
+| 2026-09-14 | `MODEL-002` | Implemented optional Responses SSE streaming with decoded terminal events, partial-output preservation, cancellation propagation, request/provider correlation, usage reconciliation, and orchestration fallback to non-streaming requests. | Focused model HTTP and agent tests; full repository validation matrix passed |
+| 2026-09-14 | `MCP-001` | Added official MCP SDK integration with configured stdio and opt-in streamable HTTP transports, namespaced tool discovery, bounded normalized results, structured change-set propagation, conservative annotation handling, network policy metadata, cancellation, and runtime lifecycle cleanup. | In-memory MCP integration/config tests; full repository validation matrix passed |
