@@ -790,35 +790,35 @@ func registerToolAdapters(registry *tools.Registry, definitions []toolAdapter) e
 
 func readOnlyAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.list", description: "List bounded workspace entries below an optional workspace-relative path.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"},"max_entries":{"type":"integer","minimum":1},"max_depth":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}}}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.list", description: "Inspect the workspace tree. Start with path (default .); set recursive=true for descendants. Hidden .git and .doit paths and ignored paths are skipped unless explicitly included. This never changes files.", parameters: `{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative directory or ."},"recursive":{"type":"boolean","default":false},"max_entries":{"type":"integer","minimum":1,"maximum":1000,"default":1000},"max_depth":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean","default":false}}}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ListRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.List(ctx, request)
 		}},
-		{name: "fs.stat", description: "Inspect one workspace entry.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.stat", description: "Inspect one workspace-relative file or directory. Read-only; path is required.", parameters: `{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative file or directory path"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StatRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Stat(ctx, request)
 		}},
-		{name: "fs.read", description: "Read bounded workspace text.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.read", description: "Read one bounded workspace-relative text file. Use start_line/end_line or max_bytes to narrow large files; this is read-only and never edits content.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"max_bytes":{"type":"integer","minimum":1,"maximum":65536,"default":65536}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ReadRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Read(ctx, request)
 		}},
-		{name: "fs.search", description: "Search bounded workspace text below an optional workspace-relative path, with an optional glob, literal or regular-expression matching, and bounded context.", parameters: `{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"mode":{"type":"string","enum":["literal","regex"]},"case_sensitive":{"type":"boolean"},"before_lines":{"type":"integer","minimum":0},"after_lines":{"type":"integer","minimum":0},"max_results":{"type":"integer","minimum":1},"include_ignored":{"type":"boolean"}},"required":["query"]}`, maxArguments: 9, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.search", description: "Find text in workspace files. query is required; optionally narrow with path and glob. Use mode=regex only for a regular expression. Results are bounded and read-only; ignored files stay hidden by default.", parameters: `{"type":"object","properties":{"query":{"type":"string","description":"Text or regex to find"},"path":{"type":"string","description":"Optional workspace-relative directory or file"},"glob":{"type":"string","description":"Optional file pattern such as *.go"},"mode":{"type":"string","enum":["literal","regex"],"default":"literal"},"case_sensitive":{"type":"boolean","default":true},"before_lines":{"type":"integer","minimum":0,"default":0},"after_lines":{"type":"integer","minimum":0,"default":0},"max_results":{"type":"integer","minimum":1,"maximum":100,"default":100},"include_ignored":{"type":"boolean","default":false}},"required":["query"]}`, maxArguments: 9, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request SearchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Search(ctx, request)
 		}},
-		{name: "fs.hash", description: "Hash one workspace file.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.hash", description: "Return a SHA-256 hash for one workspace-relative file. Use the hash as expected_hash only when the file was inspected immediately before an edit.", parameters: `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request HashRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -830,28 +830,28 @@ func readOnlyAdapters(service *Service) []toolAdapter {
 
 func mutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "fs.write", description: "Create or explicitly overwrite one bounded workspace file. Set parents=true for nested paths and overwrite=true to replace an existing file.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean"},"overwrite":{"type":"boolean"}},"required":["path","content"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: writeChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.write", description: "Create or overwrite one bounded workspace file. overwrite defaults false and must be true to replace existing content; parents=true creates missing directories. Returns a change set.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":65536},"parents":{"type":"boolean","default":false},"overwrite":{"type":"boolean","default":false}},"required":["path","content"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: writeChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request WriteRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Write(ctx, request)
 		}},
-		{name: "fs.move", description: "Move one workspace file or directory without replacing an existing destination.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: moveChangedPaths, changeSet: moveChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.move", description: "Move one workspace file or directory to a new path. Destination must not already exist; this never replaces files. Returns a change set.", parameters: `{"type":"object","properties":{"from":{"type":"string","description":"Existing workspace-relative path"},"to":{"type":"string","description":"New non-existing workspace-relative path"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: moveChangedPaths, changeSet: moveChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request MoveRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Move(ctx, request)
 		}},
-		{name: "fs.mkdir", description: "Create a workspace directory. Use parents=true for nested directory structures.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"parents":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.mkdir", description: "Create one workspace-relative directory. Use parents=true only when missing parent directories should also be created. Returns a change set.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"parents":{"type":"boolean","default":false}},"required":["path"]}`, risk: tools.RiskWrite, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request MkdirRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Mkdir(ctx, request)
 		}},
-		{name: "fs.remove", description: "Remove one workspace file or directory. Set recursive=true only when removing a directory tree is intended.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`, risk: tools.RiskDestructive, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "fs.remove", description: "Delete one workspace-relative file or directory. recursive defaults false; set it true only for an intended directory tree. Workspace root and .git are protected. Returns a change set.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean","default":false}},"required":["path"]}`, risk: tools.RiskDestructive, changedPaths: singlePathChangedPaths, changeSet: pathChangeSet, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RemoveRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err

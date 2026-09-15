@@ -123,7 +123,7 @@ type processTool struct {
 
 func (tool processTool) Definition() tools.Definition {
 	taskNames := tool.runner.taskNames()
-	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Choose the task name and, when needed, a human-readable timeout such as 5m; the caller's outer deadline still applies.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: tool.runner.maximumTimeout, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task by name; never provide an executable or shell command. Use args only for task arguments and timeout for a bounded duration. Inspect the structured passed/exit_code/diagnostics result before retrying.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: tool.runner.maximumTimeout, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
 }
 
 func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Result {

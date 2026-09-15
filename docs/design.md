@@ -339,6 +339,8 @@ A normalized result has this conceptual shape:
 
 The actual implementation types may differ, but the status distinction and bounded diagnostics are part of the tool contract. A denied action is not an empty successful result.
 
+Model-facing tool descriptions are procedural, not merely labels. Mutation-capable tool definitions should state the prerequisite inspection step, exact argument semantics, preview/dry-run behavior, conflict behavior, and the result fields that prove success. The context builder adds a short workflow reminder only when mutation tools are exposed: inspect first, preview exact edits, re-inspect after conflicts, and pass exact changed paths—including deletions—to Git commit tools. This guidance is deliberately compact so it improves small-model reliability without consuming the full context window.
+
 #### MCP Tool Interoperability
 
 MCP is the planned interoperability boundary for supporting external tools. `doit` should act as an MCP client for explicitly configured tool servers and translate MCP tool definitions and results into the normalized tool contract above. MCP support must preserve the same workspace boundary, effect metadata, timeouts, output limits, redaction, change-set evidence, and trusted workspace-automation policy as built-in tools.

@@ -857,26 +857,26 @@ func registerAdapters(registry *tools.Registry, adapters []toolAdapter) error {
 
 func gitReadAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.root", description: "Find the containing repository and HEAD state.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+		{name: "git.root", description: "Inspect repository root and HEAD state before Git operations. Read-only; no arguments.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
 			var request RootRequest
 			return service.Root(ctx, request)
 		}},
-		{name: "git.branch", description: "Inspect the current branch, upstream, and divergence.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+		{name: "git.branch", description: "Inspect current branch, upstream, and ahead/behind state before planning Git work. Read-only; no arguments.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
 			var request BranchRequest
 			return service.Branch(ctx, request)
 		}},
-		{name: "git.worktree", description: "List local Git worktrees and their branches.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
+		{name: "git.worktree", description: "List local worktrees and their branches before selecting a workspace. Read-only; no arguments.", parameters: `{"type":"object","properties":{}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, _ tools.Call) (any, error) {
 			var request WorktreeRequest
 			return service.Worktrees(ctx, request)
 		}},
-		{name: "git.status", description: "Inspect bounded Git status. Deleted paths are reported explicitly; use their exact path when staging or committing a deletion.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"include_ignored":{"type":"boolean"}}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.status", description: "First step for any commit: inspect changed paths. Each entry says modified/added/deleted/untracked and whether it is staged. For deleted files, use the exact reported path in git.stage or git.commit.", parameters: `{"type":"object","properties":{"path":{"type":"string","description":"Optional workspace-relative path"},"include_ignored":{"type":"boolean","default":false}}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StatusRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Status(ctx, request)
 		}},
-		{name: "git.diff", description: "Read a bounded worktree, index, or revision diff, optionally including untracked files.", parameters: `{"type":"object","properties":{"source":{"type":"string","enum":["worktree","index","range"]},"revision":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},"max_bytes":{"type":"integer","minimum":1},"include_untracked":{"type":"boolean"}},"required":["source"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.diff", description: "Review changes before staging or committing. source=worktree shows unstaged changes, source=index shows staged changes, and source=range shows a revision range. include_untracked=true adds untracked files only for worktree; this tool never stages files.", parameters: `{"type":"object","properties":{"source":{"type":"string","enum":["worktree","index","range"]},"revision":{"type":"string","description":"Required when source=range"},"paths":{"type":"array","items":{"type":"string"}},"max_bytes":{"type":"integer","minimum":1,"default":65536},"include_untracked":{"type":"boolean","default":false}},"required":["source"]}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request DiffRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -916,28 +916,28 @@ func gitReadAdapters(service *Service) []toolAdapter {
 
 func gitMutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.stage", description: "Stage explicit workspace paths for a later commit, including tracked deleted paths. Use the exact path reported by git.status.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.stage", description: "Second step after git.status/diff: stage exactly the selected paths, including tracked deletions. This does not commit. Repeating it is safe.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Stage(ctx, request)
 		}},
-		{name: "git.unstage", description: "Remove explicit workspace paths from the Git index without changing files.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.unstage", description: "Remove exactly the selected paths from the index without changing worktree files. Use git.status afterward to verify state.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request UnstageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Unstage(ctx, request)
 		}},
-		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Include tracked deletions by passing their exact git.status paths; the result reports staged and deleted paths.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.commit", description: "Final step after git.status and git.diff: stage and commit only the exact paths supplied. Include deleted paths even though files are missing; result reports staged/deleted paths. Never pass an unreviewed whole-repository path.", parameters: `{"type":"object","properties":{"message":{"type":"string","minLength":1,"maxLength":2000},"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request CommitRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.Commit(ctx, request)
 		}},
-		{name: "git.restore", description: "Restore explicit paths from the index, worktree, or HEAD. This can discard local changes.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"}}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.restore", description: "Destructive: discard selected worktree/index changes using mode=worktree, staged, or head. Do not use for committing; inspect git.status/diff first.", parameters: `{"type":"object","properties":{"mode":{"type":"string","enum":["worktree","staged","head"]},"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["mode","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RestoreRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err

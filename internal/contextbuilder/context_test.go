@@ -108,6 +108,29 @@ func TestBuilderExplainsBoundedSessionHistory(t *testing.T) {
 	}
 }
 
+func TestBuilderExplainsMutationWorkflow(t *testing.T) {
+	root := t.TempDir()
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{})
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{
+		Model:          "test-model",
+		UserInput:      "update the file",
+		Tools:          []model.ToolDefinition{{Type: "function", Name: "code.replace_exact"}, {Type: "function", Name: "git.commit"}},
+		MaxInputTokens: 1000,
+	})
+	if err != nil {
+		t.Fatalf("build mutation workflow context: %v", err)
+	}
+	for _, expected := range []string{"inspect before changing files", "dry_run previews", "ambiguous", "including deleted paths"} {
+		if !strings.Contains(request.Instructions, expected) {
+			t.Fatalf("mutation workflow guidance missing %q: %s", expected, request.Instructions)
+		}
+	}
+}
+
 type itemCountCounter struct{}
 
 func (itemCountCounter) Count(_ stdcontext.Context, content []byte) (int64, error) {

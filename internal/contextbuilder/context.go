@@ -16,6 +16,8 @@ const defaultInputTokenBudget = 16000
 
 const sessionHistoryGuidance = "Session context is bounded and does not contain the complete prior session. If you need an older decision, tool result, validation result, or earlier turn, use the session.history tool with a focused query and cursor. Do not assume omitted history."
 
+const toolWorkflowGuidance = "Tool workflow: inspect before changing files; use fs.read/fs.hash or git.status/git.diff first. Prefer exact structured edits for small changes and dry_run previews before applying. If a tool reports conflict or ambiguous matches, inspect again instead of retrying the same arguments. For commits, review git.status and git.diff, then pass exact changed paths to git.commit, including deleted paths."
+
 // Builder selects local repository context for model requests.
 type Builder struct {
 	filesystem *workspacefs.Service
@@ -82,6 +84,9 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 
 func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions string, definitions []model.ToolDefinition) string {
 	instructions += "\n" + builder.projectInstructions(ctx)
+	if hasToolWorkflow(definitions) {
+		instructions += "\n\n" + toolWorkflowGuidance
+	}
 	if hasTool(definitions, "session.history") {
 		instructions += "\n\n" + sessionHistoryGuidance
 	}
@@ -283,6 +288,16 @@ func toolChoice(definitions []model.ToolDefinition) string {
 func hasTool(definitions []model.ToolDefinition, name string) bool {
 	for _, definition := range definitions {
 		if definition.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolWorkflow(definitions []model.ToolDefinition) bool {
+	for _, definition := range definitions {
+		switch definition.Name {
+		case "code.apply_patch", "code.replace_exact", "code.insert_at_anchor", "code.delete_exact", "fs.write", "fs.move", "fs.remove", "git.stage", "git.commit", "git.restore":
 			return true
 		}
 	}
