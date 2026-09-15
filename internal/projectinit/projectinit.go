@@ -45,6 +45,12 @@ const configTemplate = `{
     }
   },
 	"mcp_servers": {},
+	"execution": {
+	  "request_timeout_ms": 600000,
+	  "max_rounds": 128,
+	  "process_default_timeout_ms": 120000,
+	  "process_max_timeout_ms": 1800000
+	},
   "tasks": {}
 }
 `
