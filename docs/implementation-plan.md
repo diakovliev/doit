@@ -206,6 +206,12 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | --- | --- | --- | --- | --- |
 | `SESSION-003` | Bound cumulative session usage and add model-visible bounded session history retrieval. | `SESSION-001`, `SESSION-002`, `CONTEXT-001`, `AGENT-002`, `HARD-004` | `max_input_tokens` remains a per-request context bound; `max_session_tokens` is propagated and reported as a cumulative usage threshold without prematurely stopping valid tool loops; recent resume history remains pair-safe; `session.history` searches only the active redacted session with event, cursor, event-count, and byte limits; continuation state, secrets, raw session files, and other sessions remain inaccessible; the active-session context hook is ready for future remote workspace-lease binding; focused tests cover threshold continuation, history filtering, truncation, and cancellation. | `DONE` |
 
+## Phase 7: Model Controls
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `MODEL-003` | Configure provider request parameters and safe public model diagnostics. | `MODEL-002`, `CLI-001`, `FOUND-002` | Backend profiles can send bounded structured `request_parameters` such as Responses reasoning effort without overriding core fields; `--verbose` reports response metadata, stream event types, and explicitly returned public model text while never exposing hidden reasoning; relaxed execution limits remain bounded and configurable. | `DONE` |
+
 ## Progress Log
 
 | Date | Task ID | Change | Evidence |
@@ -283,3 +289,4 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | 2026-09-14 | `CLI-001`, `HARD-002` | Replaced newline-heavy interactive progress output with one replaceable terminal status line; preserved newline-delimited progress for captured/CI output and suppressed progress in JSON mode. | Focused app progress tests and full repository validation matrix passed |
 | 2026-09-15 | `CLI-001`, `MODEL-002`, `TOOL-003` | Added safe public model-progress labels for thinking, response composition, and tool selection; added relaxed configurable request timeout, 128-round default, 2-minute process default, and 30-minute process maximum while retaining caller deadlines and bounded execution. | Focused agent/model/process/config/app tests and full repository validation matrix passed |
 | 2026-09-15 | `CLI-001`, `MODEL-002` | Activated `--verbose` as a bounded public diagnostic trace for response IDs, statuses, usage correlation, stream event types, and explicitly returned public model text; hidden chain-of-thought remains unavailable by design. | Focused agent/app tests and full repository validation matrix passed |
+| 2026-09-15 | `MODEL-003` | Added bounded profile `request_parameters` for provider-specific controls such as `reasoning.effort`, reserved core-field protection, and configuration/request regression coverage. | Focused config/model HTTP tests and full repository validation matrix passed |

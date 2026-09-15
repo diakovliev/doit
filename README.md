@@ -183,6 +183,24 @@ Execution limits can be relaxed per project without making the agent unbounded:
 
 These settings control the model HTTP request timeout, maximum model/tool rounds, default configured-process timeout, and maximum configured-process timeout. The caller's `--timeout` remains the hard deadline for the complete invocation.
 
+Provider-specific request parameters can be configured under a backend profile. For Responses reasoning models, for example:
+
+```json
+{
+  "profiles": {
+    "reasoning-model": {
+      "api_root": "https://example.test/v1",
+      "model": "<model-id>",
+      "request_parameters": {
+        "reasoning": {"effort": "high"}
+      }
+    }
+  }
+}
+```
+
+These values are merged into every provider request. Core fields such as `model`, `input`, `tools`, `stream`, and `max_output_tokens` cannot be overridden. Unsupported parameters remain the backend's responsibility and may be rejected by the provider.
+
 An authenticated Microsoft Foundry profile can look like this:
 
 ```json

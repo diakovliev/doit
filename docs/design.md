@@ -221,6 +221,8 @@ An OpenAI-compatible backend is any HTTP(S) service that satisfies the following
 
 The backend does not need to implement every field or endpoint in the OpenAI reference. Optional request fields are sent only when enabled by a capability profile. Unknown response fields and output item types must be tolerated so compatible backends can add features without breaking the client.
 
+Backend profiles may define bounded `request_parameters` for provider-supported request controls that are not part of the provider-neutral contract. The adapter merges these structured JSON values into each request. A common Responses example is `{"reasoning":{"effort":"high"}}`. Core fields such as `model`, `input`, `tools`, `tool_choice`, `max_output_tokens`, and `stream` are reserved and cannot be overridden through this mechanism; unsupported provider parameters are surfaced as backend errors.
+
 #### Capability Tiers
 
 Capabilities are declared or discovered per backend and are reported to the user when a connection is tested:
