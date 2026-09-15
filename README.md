@@ -259,7 +259,7 @@ DOIT_API_KEY_ENV
 DOIT_EPHEMERAL
 ```
 
-The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
+The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `small-edit`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. `small-edit` exposes read-only inspection plus exact structured edit tools, but not broad patches, process execution, or Git mutation. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
 
 Configuration precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, and command-line flags.
 
@@ -349,13 +349,14 @@ Filesystem inspection:
 - `fs.stat`
 - `fs.read`
 - `fs.search`
+- `fs.fuzzy_search`
 - `fs.hash`
 - `fs.write`
 - `fs.move`
 - `fs.mkdir`
 - `fs.remove`
 
-Use `fs.list` to inspect the workspace tree; pass a relative `path` such as `docs` and `recursive: true` to enumerate a subtree. Use `fs.search` with the same relative `path` and an optional glob such as `*.md` to search within that subtree. Use `fs.write` to create or explicitly overwrite bounded files, `fs.move` to move files or directories without replacement, `fs.mkdir` with `parents: true` to create nested directories, and `fs.remove` with `recursive: true` only when removing a directory tree is intended. All mutation tools are workspace-confined; the workspace root and `.git` metadata are protected. Use `code.apply_patch` for larger reviewable file changes. Agent mode asks for approval, while `doit run` can automate local workspace changes.
+Use `fs.list` to inspect the workspace tree; pass a relative `path` such as `docs` and `recursive: true` to enumerate a subtree. Use `fs.search` with the same relative `path` and an optional glob such as `*.md` to search within that subtree. Use `fs.fuzzy_search` when the exact spelling is uncertain; select `target: "path"` for file discovery, `target: "content"` for line discovery, or `target: "path_and_content"` for both. Fuzzy scores rank results for the same query and are discovery hints, not edit authorization; use `fs.read` and `fs.hash` before changing a returned path. Use `fs.write` to create or explicitly overwrite bounded files, `fs.move` to move files or directories without replacement, `fs.mkdir` with `parents: true` to create nested directories, and `fs.remove` with `recursive: true` only when removing a directory tree is intended. All mutation tools are workspace-confined; the workspace root and `.git` metadata are protected. Use `code.apply_patch` for larger reviewable file changes. Agent mode asks for approval, while `doit run` can automate local workspace changes.
 
 Git inspection and local operations:
 
@@ -386,7 +387,7 @@ Code and validation:
 - `code.format`
 - `process.run`
 
-For small, localized edits, prefer `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact`. They require exactly one match, reject ambiguous anchors, support expected hashes and dry-run previews, and return change-set evidence. Use `code.apply_patch` for larger multi-file changes. `code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
+For small, localized edits, prefer `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact`. They require exactly one match, reject ambiguous anchors, support expected hashes and dry-run previews, and return change-set evidence. `code.rename` also returns before/after hashes for both paths. Tool failures include a stable diagnostic code and, when useful, a retryability flag and next action so the model can recover without repeating the same invalid call. Use `code.apply_patch` for larger multi-file changes. `code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
 
 `process.run` accepts a configured task name, not an executable or shell command. Define repository tasks in `.doit/config.json` or another selected configuration file:
 
