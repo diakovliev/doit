@@ -155,7 +155,9 @@ The orchestrator coordinates a single task or an interactive session:
 7. Repeat until the model reaches a final response, the user cancels, or a limit is reached.
 8. Produce a final summary containing actions, changed files, validation results, and unresolved issues.
 
-The safe local MVP uses a default maximum of 32 model/tool rounds. A task that reaches the limit fails with its accumulated usage and session evidence rather than continuing indefinitely.
+The safe local MVP uses a default maximum of 128 model/tool rounds. A task that reaches the limit fails with its accumulated usage and session evidence rather than continuing indefinitely; project configuration may choose a lower or higher bounded value.
+
+Human-mode console output may vocalize public lifecycle state with concise labels such as `thinking about the next action`, `thinking after tool results`, `composing public response`, and `selected tool actions`. In `--verbose` mode it may also show a bounded preview of text explicitly returned by the model as ordinary public output, including an explicit rationale if the model chose to return one. These labels and previews describe observable output only. Hidden chain-of-thought, provider reasoning traces, and raw reasoning-token content are never rendered or persisted as public session output.
 
 The orchestrator should not know provider-specific request formats or shell-specific rendering details.
 
@@ -224,7 +226,7 @@ The backend does not need to implement every field or endpoint in the OpenAI ref
 Capabilities are declared or discovered per backend and are reported to the user when a connection is tested:
 
 - **Core:** Non-streaming text responses and client-defined function calling. This is the minimum required for agent mode.
-- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. Streaming is planned for Phase 5; if it is unavailable, the adapter continues to use the non-streaming request path.
+- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. If it is unavailable, the adapter continues to use the non-streaming request path.
 - **Structured output:** JSON Schema response formats for machine-readable task results.
 - **Multimodal input:** Image or file input items accepted by the backend.
 - **Managed state:** `previous_response_id` or `conversation` support. This is optional because `doit` manages conversation state locally by default.
