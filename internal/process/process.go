@@ -12,9 +12,9 @@ import (
 
 const (
 	// DefaultTaskTimeout applies when the model omits a process deadline.
-	DefaultTaskTimeout = 30 * time.Second
+	DefaultTaskTimeout = 2 * time.Minute
 	// MaximumTaskTimeout bounds a model-selected process deadline.
-	MaximumTaskTimeout = 10 * time.Minute
+	MaximumTaskTimeout = 30 * time.Minute
 )
 
 // Task identifies a configured process task and its bounded arguments.

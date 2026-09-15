@@ -33,7 +33,7 @@ The current vertical slice supports:
 - Provider rate-limit handling with bounded retries and backoff
 - Deterministic tests without live model credentials
 
-The specialized `develop`, `review`, and `test` workflows are reserved in the CLI but are not yet separate workflow implementations. Streaming Responses support is deferred. Write and process tools require approval, and the current CLI composition uses conservative non-interactive behavior.
+The specialized `develop`, `review`, and `test` workflows are reserved in the CLI but are not yet separate workflow implementations. Responses streaming is supported when enabled by a backend profile. Human-mode progress reports public model activity such as thinking, response composition, and selected tool actions; it never prints hidden reasoning traces.
 
 See the project documents for the full direction and implementation status:
 
@@ -142,7 +142,7 @@ The command creates `.doit/config.json`, `.doit/instructions.md`, instruction an
 | `--timeout <duration>` | Set the request context deadline. | `doit --timeout 10m run "Review the repository"` |
 | `--no-color` | Disable terminal styling. | `doit --no-color run "Summarize"` |
 | `--quiet` | Reserved output-control flag (currently non-functional). | `doit --quiet run "Summarize"` |
-| `--verbose` | Reserved diagnostic-output flag (currently non-functional). | `doit --verbose run "Summarize"` |
+| `--verbose` | Show bounded public model diagnostics and text explicitly returned by the model, including response IDs, statuses, usage, and stream event types. Hidden reasoning is never printed. | `doit --verbose run "Summarize"` |
 
 Use `--` when you need to terminate global option parsing before arguments:
 
@@ -167,6 +167,39 @@ A local Ollama profile can look like this:
   }
 }
 ```
+
+Execution limits can be relaxed per project without making the agent unbounded:
+
+```json
+{
+  "execution": {
+    "request_timeout_ms": 600000,
+    "max_rounds": 128,
+    "process_default_timeout_ms": 120000,
+    "process_max_timeout_ms": 1800000
+  }
+}
+```
+
+These settings control the model HTTP request timeout, maximum model/tool rounds, default configured-process timeout, and maximum configured-process timeout. The caller's `--timeout` remains the hard deadline for the complete invocation.
+
+Provider-specific request parameters can be configured under a backend profile. For Responses reasoning models, for example:
+
+```json
+{
+  "profiles": {
+    "reasoning-model": {
+      "api_root": "https://example.test/v1",
+      "model": "<model-id>",
+      "request_parameters": {
+        "reasoning": {"effort": "high"}
+      }
+    }
+  }
+}
+```
+
+These values are merged into every provider request. Core fields such as `model`, `input`, `tools`, `stream`, and `max_output_tokens` cannot be overridden. Unsupported parameters remain the backend's responsibility and may be rejected by the provider.
 
 An authenticated Microsoft Foundry profile can look like this:
 
@@ -340,17 +373,20 @@ Git inspection and local operations:
 - `git.branch`
 - `git.worktree`
 
-Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
+Local Git mutations are explicit and workspace-scoped. Use `git.status` first: tracked deletions are labeled `deleted` and include their exact path. Pass that exact deleted path to `git.stage` or `git.commit`; repeated staging is safe, and commit results report the deleted paths included. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
 
 Code and validation:
 
 - `code.check_patch`
 - `code.apply_patch`
+- `code.replace_exact`
+- `code.insert_at_anchor`
+- `code.delete_exact`
 - `code.rename`
 - `code.format`
 - `process.run`
 
-`code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
+For small, localized edits, prefer `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact`. They require exactly one match, reject ambiguous anchors, support expected hashes and dry-run previews, and return change-set evidence. Use `code.apply_patch` for larger multi-file changes. `code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
 
 `process.run` accepts a configured task name, not an executable or shell command. Define repository tasks in `.doit/config.json` or another selected configuration file:
 
@@ -367,7 +403,7 @@ The model-facing schema advertises the tasks available in the current workspace.
 
 MCP is the planned extension boundary for external tools. Configured MCP servers will be mapped into the same normalized tool, policy, workspace, timeout, output, redaction, and change-set contracts as built-in tools. Cloud session synchronization and hosted telemetry are intentionally not part of `doit`; general plugins remain undecided.
 
-The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. Each process is capped at 10 minutes, and a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
+The model may choose a process deadline with a human-readable `timeout`, such as `"5m"`. The default configured-process timeout is 2 minutes and the default maximum is 30 minutes; a caller-supplied global `--timeout` remains a hard upper bound for the entire request. Omit the global option when the model should choose per-process deadlines without a caller-imposed request deadline.
 
 Read-only inspection is automatic within the workspace scope. In `doit agent`, writes, deletes, formatter execution, and process tasks show an approval prompt. Answer `y` or `yes` to allow one action. `doit run` is trusted workspace automation: configured operations inside the effective workspace, including destructive local changes, run without prompting. The resulting diff, change request, validation output, and session evidence are the human review surface; workspace boundaries, symlink checks, and configured capability allowlists remain active. JSON mode stays non-interactive and does not emit prompts.
 

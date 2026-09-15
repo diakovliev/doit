@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,6 +63,27 @@ func assertPrecedenceConfig(t *testing.T, configuration Config) {
 	if configuration.Tasks["probe"].Executable != "git" {
 		t.Fatalf("expected configured project task: %+v", configuration.Tasks)
 	}
+	assertExecutionDefaults(t, configuration.Execution)
+}
+
+func assertExecutionDefaults(t *testing.T, execution ExecutionConfig) {
+	t.Helper()
+	if execution.MaxRounds != 128 || execution.RequestTimeoutMs != 600000 {
+		t.Fatalf("expected relaxed execution defaults: %+v", execution)
+	}
+}
+
+func TestLoadMergesExecutionLimits(t *testing.T) {
+	workspace := t.TempDir()
+	projectFile := filepath.Join(workspace, "project.json")
+	writeConfigFile(t, projectFile, `{"execution":{"request_timeout_ms":900000,"max_rounds":256,"process_default_timeout_ms":180000,"process_max_timeout_ms":3600000}}`)
+	configuration, err := Load(LoadOptions{Workspace: workspace, ProjectFile: projectFile, UserFile: filepath.Join(workspace, "missing-user.json")})
+	if err != nil {
+		t.Fatalf("load execution limits: %v", err)
+	}
+	if configuration.Execution.RequestTimeoutMs != 900000 || configuration.Execution.MaxRounds != 256 || configuration.Execution.ProcessMaxTimeoutMs != 3600000 {
+		t.Fatalf("execution limits were not merged: %+v", configuration.Execution)
+	}
 }
 
 func TestLoadRejectsInvalidJSON(t *testing.T) {
@@ -108,6 +130,23 @@ func TestBackendProfileValidation(t *testing.T) {
 	profile.Model = ""
 	if err := profile.Validate(); err == nil {
 		t.Fatal("expected missing model to fail")
+	}
+}
+
+func TestBackendProfileAcceptsReasoningRequestParameters(t *testing.T) {
+	profile := BackendProfile{
+		APIRoot: "https://example.test/v1",
+		Model:   "model",
+		RequestParameters: map[string]json.RawMessage{
+			"reasoning": json.RawMessage(`{"effort":"high"}`),
+		},
+	}
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("expected reasoning request parameters to validate: %v", err)
+	}
+	profile.RequestParameters["model"] = json.RawMessage(`"unsafe-override"`)
+	if err := profile.Validate(); err == nil {
+		t.Fatal("expected core request override to be rejected")
 	}
 }
 

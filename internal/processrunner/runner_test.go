@@ -63,6 +63,25 @@ func TestRunnerTimesOut(t *testing.T) {
 	}
 }
 
+func TestRunnerUsesConfiguredTimeoutLimits(t *testing.T) {
+	runner, err := NewWithLimits(t.TempDir(), 1024, 2*time.Minute, 45*time.Minute)
+	if err != nil {
+		t.Fatalf("new runner with limits: %v", err)
+	}
+	runner.tasks["probe"] = Definition{Name: "probe", Executable: "fixture"}
+	_, _, timeout, err := runner.prepare(process.Task{Name: "probe"})
+	if err != nil || timeout != 2*time.Minute {
+		t.Fatalf("unexpected configured default timeout: %s, error=%v", timeout, err)
+	}
+	_, _, timeout, err = runner.prepare(process.Task{Name: "probe", Timeout: 40 * time.Minute})
+	if err != nil || timeout != 40*time.Minute {
+		t.Fatalf("unexpected configured selected timeout: %s, error=%v", timeout, err)
+	}
+	if _, _, _, err := runner.prepare(process.Task{Name: "probe", Timeout: 46 * time.Minute}); err == nil {
+		t.Fatal("expected configured maximum timeout to be enforced")
+	}
+}
+
 func TestWorkingDirectoryRejectsSymlinkEscape(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()

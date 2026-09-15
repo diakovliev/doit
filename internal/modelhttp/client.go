@@ -29,6 +29,7 @@ const maxErrorBodyBytes = 16 * 1024
 // Options configures transport, token estimation, and rate-limit behavior.
 type Options struct {
 	HTTPClient   *http.Client
+	Timeout      time.Duration
 	TokenCounter usage.TokenCounter
 	APIKey       string
 	RateLimit    *RateLimitPolicy
@@ -51,6 +52,7 @@ type Client struct {
 	httpClient        *http.Client
 	tokenCounter      usage.TokenCounter
 	apiKey            string
+	requestParameters map[string]json.RawMessage
 	rateLimit         RateLimitPolicy
 	rateMu            sync.Mutex
 	nextRequest       time.Time
@@ -78,7 +80,11 @@ func New(profile config.BackendProfile, options Options) (*Client, error) {
 	}
 	httpClient := options.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 60 * time.Second}
+		timeout := options.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Minute
+		}
+		httpClient = &http.Client{Timeout: timeout}
 	}
 	counter := options.TokenCounter
 	if counter == nil {
@@ -88,7 +94,7 @@ func New(profile config.BackendProfile, options Options) (*Client, error) {
 	if options.RateLimit != nil {
 		rateLimit = normalizeRateLimit(*options.RateLimit)
 	}
-	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, rateLimit: rateLimit, onRetry: options.OnRetry}, nil
+	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, requestParameters: profile.RequestParameters, rateLimit: rateLimit, onRetry: options.OnRetry}, nil
 }
 
 // Create implements model.ModelClient using POST {api_root}/responses.
@@ -98,7 +104,7 @@ func (client *Client) Create(ctx context.Context, request model.Request) (model.
 	}
 	wireNames := wireToolNames(request.Tools)
 	request = wireRequest(request, wireNames)
-	body, err := json.Marshal(request)
+	body, err := client.marshalRequest(request)
 	if err != nil {
 		return model.Response{}, apperr.Wrap(apperr.KindBackend, "modelhttp.encode", err)
 	}
@@ -117,7 +123,7 @@ func (client *Client) CreateStream(ctx context.Context, request model.Request, o
 	wireNames := wireToolNames(request.Tools)
 	request = wireRequest(request, wireNames)
 	request.Stream = true
-	body, err := json.Marshal(request)
+	body, err := client.marshalRequest(request)
 	if err != nil {
 		return model.Response{}, apperr.Wrap(apperr.KindBackend, "modelhttp.encode", err)
 	}
@@ -126,6 +132,24 @@ func (client *Client) CreateStream(ctx context.Context, request model.Request, o
 		reservedTokens += estimatedInput
 	}
 	return client.executeStream(ctx, body, wireNames, reservedTokens, onEvent)
+}
+
+func (client *Client) marshalRequest(request model.Request) ([]byte, error) {
+	if len(client.requestParameters) == 0 {
+		return json.Marshal(request)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		return nil, err
+	}
+	for name, value := range client.requestParameters {
+		wire[name] = append(json.RawMessage(nil), value...)
+	}
+	return json.Marshal(wire)
 }
 
 func (client *Client) executeStream(ctx context.Context, body []byte, wireNames map[string]string, reservedTokens int64, onEvent func(model.StreamEvent) error) (model.Response, error) {

@@ -63,7 +63,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
-	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, Format: invocation.Format, Ephemeral: ephemeralOverride(invocation)}})
+	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, Format: invocation.Format, Verbose: invocation.Verbose, Ephemeral: ephemeralOverride(invocation)}})
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func runConfiguredTest(ctx context.Context, invocation cli.Invocation, stdout io
 	if err != nil {
 		return err
 	}
-	runner, err := processrunner.New(configuration.Workspace, 64*1024)
+	runner, err := processrunner.NewWithLimits(configuration.Workspace, 64*1024, executionDuration(configuration.Execution.ProcessDefaultTimeoutMs), executionDuration(configuration.Execution.ProcessMaxTimeoutMs))
 	if err != nil {
 		return err
 	}
@@ -397,7 +397,7 @@ func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Read
 	if err != nil {
 		return err
 	}
-	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, Format: invocation.Format, Ephemeral: ephemeralOverride(invocation)}})
+	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, Format: invocation.Format, Verbose: invocation.Verbose, Ephemeral: ephemeralOverride(invocation)}})
 	if err != nil {
 		return err
 	}
@@ -493,7 +493,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	processService, err := processrunner.New(configuration.Workspace, 64*1024)
+	processService, err := processrunner.NewWithLimits(configuration.Workspace, 64*1024, executionDuration(configuration.Execution.ProcessDefaultTimeoutMs), executionDuration(configuration.Execution.ProcessMaxTimeoutMs))
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
@@ -513,7 +513,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 		_ = sessionStore.Close()
 		return runtimeDependencies{}, err
 	}
-	modelClient, err := modelhttp.New(profile, modelhttp.Options{TokenCounter: usage.ByteEstimator{}, OnRetry: func(attempt int, delay time.Duration) {
+	modelClient, err := modelhttp.New(profile, modelhttp.Options{Timeout: executionDuration(configuration.Execution.RequestTimeoutMs), TokenCounter: usage.ByteEstimator{}, OnRetry: func(attempt int, delay time.Duration) {
 		if progress != nil {
 			progress(agent.ProgressEvent{Phase: "rate-limit", Message: fmt.Sprintf("throttled; retry %d in %s", attempt, delay.Round(time.Millisecond))})
 		}
@@ -524,8 +524,15 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 		return runtimeDependencies{}, err
 	}
 	contextBuilder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(gitService.StatusSummary)
-	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: toolset.registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress, Streaming: profile.Streaming}
+	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: toolset.registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress, Streaming: profile.Streaming, Verbose: configuration.Verbose, MaxRounds: configuration.Execution.MaxRounds}
 	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close(); toolset.close() }}, nil
+}
+
+func executionDuration(milliseconds int) time.Duration {
+	if milliseconds <= 0 {
+		return 0
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service, sessionStore session.Store) (runtimeTools, error) {

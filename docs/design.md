@@ -155,7 +155,9 @@ The orchestrator coordinates a single task or an interactive session:
 7. Repeat until the model reaches a final response, the user cancels, or a limit is reached.
 8. Produce a final summary containing actions, changed files, validation results, and unresolved issues.
 
-The safe local MVP uses a default maximum of 32 model/tool rounds. A task that reaches the limit fails with its accumulated usage and session evidence rather than continuing indefinitely.
+The safe local MVP uses a default maximum of 128 model/tool rounds. A task that reaches the limit fails with its accumulated usage and session evidence rather than continuing indefinitely; project configuration may choose a lower or higher bounded value.
+
+Human-mode console output may vocalize public lifecycle state with concise labels such as `thinking about the next action`, `thinking after tool results`, `composing public response`, and `selected tool actions`. In `--verbose` mode it may also show a bounded preview of text explicitly returned by the model as ordinary public output, including an explicit rationale if the model chose to return one. These labels and previews describe observable output only. Hidden chain-of-thought, provider reasoning traces, and raw reasoning-token content are never rendered or persisted as public session output.
 
 The orchestrator should not know provider-specific request formats or shell-specific rendering details.
 
@@ -219,12 +221,14 @@ An OpenAI-compatible backend is any HTTP(S) service that satisfies the following
 
 The backend does not need to implement every field or endpoint in the OpenAI reference. Optional request fields are sent only when enabled by a capability profile. Unknown response fields and output item types must be tolerated so compatible backends can add features without breaking the client.
 
+Backend profiles may define bounded `request_parameters` for provider-supported request controls that are not part of the provider-neutral contract. The adapter merges these structured JSON values into each request. A common Responses example is `{"reasoning":{"effort":"high"}}`. Core fields such as `model`, `input`, `tools`, `tool_choice`, `max_output_tokens`, and `stream` are reserved and cannot be overridden through this mechanism; unsupported provider parameters are surfaced as backend errors.
+
 #### Capability Tiers
 
 Capabilities are declared or discovered per backend and are reported to the user when a connection is tested:
 
 - **Core:** Non-streaming text responses and client-defined function calling. This is the minimum required for agent mode.
-- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. Streaming is planned for Phase 5; if it is unavailable, the adapter continues to use the non-streaming request path.
+- **Interactive:** Server-sent event streaming with at least `response.output_text.delta` and a terminal completion or failure event. If it is unavailable, the adapter continues to use the non-streaming request path.
 - **Structured output:** JSON Schema response formats for machine-readable task results.
 - **Multimodal input:** Image or file input items accepted by the backend.
 - **Managed state:** `previous_response_id` or `conversation` support. This is optional because `doit` manages conversation state locally by default.
@@ -361,10 +365,13 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 
 - `code.check_patch`: Validate a unified patch without changing files and return the affected paths and conflicts.
 - `code.apply_patch`: Create, update, or delete files from a validated patch. It must support preview, atomic per-file replacement, expected-content hashes, and conflict failure.
+- `code.replace_exact`: Replace exactly one occurrence of text in an existing file. Zero or multiple matches are conflicts, not fuzzy-edit opportunities.
+- `code.insert_at_anchor`: Insert content before or after exactly one anchor in an existing file.
+- `code.delete_exact`: Delete exactly one occurrence of text in an existing file.
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
 - `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
-All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch operations must support pre-apply preview and conflict validation; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
+All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch and structured edit operations must support pre-apply preview, exact-match validation, expected-content hashes, immediate pre-apply rechecks, and conflict failure; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
 
 **Git inspection** is first-class and must not be implemented by asking the model to compose arbitrary Git commands:
 
@@ -393,12 +400,12 @@ The project configuration may set `tool_profile` to `full`, `inspect`, `edit`, `
 Local Git mutations are first-class workspace tools with structured arguments and stronger policy checks:
 
 - `git.stage` and `git.unstage`: Change the index for explicitly selected workspace paths.
-- `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing and never includes unrelated paths.
+- `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing, includes tracked deletions when their exact status path is selected, reports staged/deleted paths in its result, and never includes unrelated paths.
 - `git.restore`: Restore explicitly selected paths from the index or `HEAD`; worktree restoration is destructive.
 
 `doit agent` confirms these operations individually. `doit run` is trusted workspace automation and may execute configured local Git operations, including destructive ones, without an interactive prompt; path confinement, Git validation, and review artifacts remain active. Push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, and remote management require separate capabilities and are not implied by local workspace authorization.
 
-Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials.
+Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials. Staging is idempotent for already-staged tracked deletions so a separate `git.stage` followed by `git.commit` does not lose or reject the deletion.
 
 ### 4.6 Approval and Safety Policy
 

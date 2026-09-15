@@ -31,13 +31,20 @@ type Definition struct {
 
 // Runner executes definitions below one workspace root.
 type Runner struct {
-	workspace string
-	tasks     map[string]Definition
-	maxOutput int
+	workspace      string
+	tasks          map[string]Definition
+	maxOutput      int
+	defaultTimeout time.Duration
+	maximumTimeout time.Duration
 }
 
 // New creates an empty runner rooted at workspace.
 func New(workspace string, maxOutputBytes int) (*Runner, error) {
+	return NewWithLimits(workspace, maxOutputBytes, process.DefaultTaskTimeout, process.MaximumTaskTimeout)
+}
+
+// NewWithLimits creates a runner with explicit model-selectable timeout bounds.
+func NewWithLimits(workspace string, maxOutputBytes int, defaultTimeout, maximumTimeout time.Duration) (*Runner, error) {
 	absoluteWorkspace, err := filepath.Abs(workspace)
 	if err != nil {
 		return nil, apperr.Wrap(apperr.KindConfig, "processrunner.workspace", err)
@@ -45,7 +52,16 @@ func New(workspace string, maxOutputBytes int) (*Runner, error) {
 	if maxOutputBytes <= 0 {
 		maxOutputBytes = 64 * 1024
 	}
-	return &Runner{workspace: absoluteWorkspace, tasks: make(map[string]Definition), maxOutput: maxOutputBytes}, nil
+	if defaultTimeout <= 0 {
+		defaultTimeout = process.DefaultTaskTimeout
+	}
+	if maximumTimeout <= 0 {
+		maximumTimeout = process.MaximumTaskTimeout
+	}
+	if defaultTimeout > maximumTimeout {
+		return nil, apperr.New(apperr.KindConfig, "processrunner.timeout", "default process timeout exceeds maximum")
+	}
+	return &Runner{workspace: absoluteWorkspace, tasks: make(map[string]Definition), maxOutput: maxOutputBytes, defaultTimeout: defaultTimeout, maximumTimeout: maximumTimeout}, nil
 }
 
 // Register adds an executable task to the allowlist.
@@ -107,7 +123,7 @@ type processTool struct {
 
 func (tool processTool) Definition() tools.Definition {
 	taskNames := tool.runner.taskNames()
-	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Choose the task name and, when needed, a human-readable timeout such as 5m; the caller's outer deadline still applies.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: 30 * time.Second, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
+	return tools.Definition{Name: "process.run", Description: "Run one configured allowlisted task. Choose the task name and, when needed, a human-readable timeout such as 5m; the caller's outer deadline still applies.", Parameters: processParameters(taskNames), Risk: tools.RiskProcess, Timeout: tool.runner.maximumTimeout, MaxOutputBytes: 64 * 1024, MaxArguments: 16}
 }
 
 func (tool processTool) Execute(ctx context.Context, call tools.Call) tools.Result {
@@ -133,10 +149,10 @@ func (runner *Runner) prepare(task process.Task) (Definition, string, time.Durat
 	}
 	timeout := task.Timeout
 	if timeout <= 0 {
-		timeout = process.DefaultTaskTimeout
+		timeout = runner.defaultTimeout
 	}
-	if timeout > process.MaximumTaskTimeout {
-		return Definition{}, "", 0, apperr.New(apperr.KindPolicy, "processrunner.run", "task timeout exceeds maximum of "+process.MaximumTaskTimeout.String())
+	if timeout > runner.maximumTimeout {
+		return Definition{}, "", 0, apperr.New(apperr.KindPolicy, "processrunner.run", "task timeout exceeds maximum of "+runner.maximumTimeout.String())
 	}
 	return definition, workingDirectory, timeout, nil
 }

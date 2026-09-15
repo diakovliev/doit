@@ -18,12 +18,13 @@ import (
 
 // BackendProfile selects one OpenAI-compatible model backend.
 type BackendProfile struct {
-	APIRoot   string            `json:"api_root"`
-	Model     string            `json:"model"`
-	Streaming bool              `json:"streaming,omitempty"`
-	APIKeyEnv string            `json:"api_key_env,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	RateLimit RateLimitConfig   `json:"rate_limit,omitempty"`
+	APIRoot           string                     `json:"api_root"`
+	Model             string                     `json:"model"`
+	Streaming         bool                       `json:"streaming,omitempty"`
+	APIKeyEnv         string                     `json:"api_key_env,omitempty"`
+	Headers           map[string]string          `json:"headers,omitempty"`
+	RequestParameters map[string]json.RawMessage `json:"request_parameters,omitempty"`
+	RateLimit         RateLimitConfig            `json:"rate_limit,omitempty"`
 }
 
 // RateLimitConfig controls bounded client-side retries after provider throttling.
@@ -41,6 +42,14 @@ type TokenBudget struct {
 	MaxInputTokens   int `json:"max_input_tokens"`
 	MaxOutputTokens  int `json:"max_output_tokens"`
 	MaxSessionTokens int `json:"max_session_tokens"`
+}
+
+// ExecutionConfig controls model, agent, and configured-process execution limits.
+type ExecutionConfig struct {
+	RequestTimeoutMs        int `json:"request_timeout_ms,omitempty"`
+	MaxRounds               int `json:"max_rounds,omitempty"`
+	ProcessDefaultTimeoutMs int `json:"process_default_timeout_ms,omitempty"`
+	ProcessMaxTimeoutMs     int `json:"process_max_timeout_ms,omitempty"`
 }
 
 // TaskConfig describes one project-defined allowlisted process task.
@@ -70,10 +79,12 @@ type Config struct {
 	Profile     string                     `json:"profile"`
 	ToolProfile string                     `json:"tool_profile"`
 	Format      string                     `json:"format"`
+	Verbose     bool                       `json:"-"`
 	Ephemeral   bool                       `json:"ephemeral"`
 	Profiles    map[string]BackendProfile  `json:"profiles"`
 	Tasks       map[string]TaskConfig      `json:"tasks"`
 	MCPServers  map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	Execution   ExecutionConfig            `json:"execution"`
 	Token       TokenBudget                `json:"token"`
 }
 
@@ -84,6 +95,7 @@ type Overrides struct {
 	APIRoot   string
 	APIKeyEnv string
 	Format    string
+	Verbose   bool
 	Ephemeral *bool
 }
 
@@ -104,6 +116,7 @@ type fileConfig struct {
 	Ephemeral      *bool                      `json:"ephemeral"`
 	Tasks          map[string]TaskConfig      `json:"tasks"`
 	MCPServers     map[string]MCPServerConfig `json:"mcp_servers"`
+	Execution      ExecutionConfig            `json:"execution"`
 	Token          TokenBudget                `json:"token"`
 }
 
@@ -113,6 +126,16 @@ func DefaultTokenBudget() TokenBudget {
 		MaxInputTokens:   16000,
 		MaxOutputTokens:  4000,
 		MaxSessionTokens: 64000,
+	}
+}
+
+// DefaultExecutionConfig returns relaxed but bounded execution defaults.
+func DefaultExecutionConfig() ExecutionConfig {
+	return ExecutionConfig{
+		RequestTimeoutMs:        10 * 60 * 1000,
+		MaxRounds:               128,
+		ProcessDefaultTimeoutMs: 2 * 60 * 1000,
+		ProcessMaxTimeoutMs:     30 * 60 * 1000,
 	}
 }
 
@@ -170,6 +193,7 @@ func defaultConfig(workspace string) Config {
 		Profiles:    make(map[string]BackendProfile),
 		Tasks:       make(map[string]TaskConfig),
 		MCPServers:  make(map[string]MCPServerConfig),
+		Execution:   DefaultExecutionConfig(),
 		Token:       DefaultTokenBudget(),
 	}
 }
@@ -230,7 +254,34 @@ func (profile BackendProfile) Validate() error {
 	if profile.Model == "" {
 		return apperr.New(apperr.KindConfig, "config.profile", "model is required")
 	}
+	return validateRequestParameters(profile.RequestParameters)
+}
+
+func validateRequestParameters(parameters map[string]json.RawMessage) error {
+	if len(parameters) > 32 {
+		return apperr.New(apperr.KindConfig, "config.profile", "request_parameters are limited to 32 entries")
+	}
+	for name, value := range parameters {
+		if name == "" || strings.ContainsAny(name, "\r\n") {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter names must be non-empty and single-line")
+		}
+		if reservedRequestParameter(name) {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter cannot override core request field: "+name)
+		}
+		if len(value) == 0 || len(value) > 16*1024 || !json.Valid(value) {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter value is invalid or oversized: "+name)
+		}
+	}
 	return nil
+}
+
+func reservedRequestParameter(name string) bool {
+	switch name {
+	case "model", "instructions", "input", "tools", "tool_choice", "max_output_tokens", "stream":
+		return true
+	default:
+		return false
+	}
 }
 
 func readFileConfig(filePath string) (fileConfig, error) {
@@ -262,6 +313,7 @@ func applyFileConfig(result *Config, loaded fileConfig) {
 	applyFileProfiles(result, loaded.Profiles)
 	applyFileTasks(result, loaded.Tasks)
 	applyFileMCPServers(result, loaded.MCPServers)
+	applyFileExecution(result, loaded.Execution)
 	applyFileToken(result, loaded.Token)
 }
 
@@ -306,6 +358,21 @@ func applyFileTasks(result *Config, tasks map[string]TaskConfig) {
 func applyFileMCPServers(result *Config, servers map[string]MCPServerConfig) {
 	for name, server := range servers {
 		result.MCPServers[name] = server
+	}
+}
+
+func applyFileExecution(result *Config, execution ExecutionConfig) {
+	if execution.RequestTimeoutMs > 0 {
+		result.Execution.RequestTimeoutMs = execution.RequestTimeoutMs
+	}
+	if execution.MaxRounds > 0 {
+		result.Execution.MaxRounds = execution.MaxRounds
+	}
+	if execution.ProcessDefaultTimeoutMs > 0 {
+		result.Execution.ProcessDefaultTimeoutMs = execution.ProcessDefaultTimeoutMs
+	}
+	if execution.ProcessMaxTimeoutMs > 0 {
+		result.Execution.ProcessMaxTimeoutMs = execution.ProcessMaxTimeoutMs
 	}
 }
 
@@ -449,11 +516,18 @@ func applyOverrides(result *Config, overrides Overrides) {
 	if overrides.Model != "" || overrides.APIRoot != "" || overrides.APIKeyEnv != "" {
 		result.Profiles[result.Profile] = profile
 	}
+	applyOutputOverrides(result, overrides)
+	if overrides.Ephemeral != nil {
+		result.Ephemeral = *overrides.Ephemeral
+	}
+}
+
+func applyOutputOverrides(result *Config, overrides Overrides) {
 	if overrides.Format != "" {
 		result.Format = overrides.Format
 	}
-	if overrides.Ephemeral != nil {
-		result.Ephemeral = *overrides.Ephemeral
+	if overrides.Verbose {
+		result.Verbose = true
 	}
 }
 

@@ -196,12 +196,39 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			return service.Format(ctx, request)
 		}},
 	}
+	adapters = append(adapters, structuredEditAdapters(service)...)
 	for _, adapter := range adapters {
 		if err := registry.Register(adapter); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func structuredEditAdapters(service *Service) []toolAdapter {
+	return []toolAdapter{
+		{name: "code.replace_exact", description: "Replace exactly one occurrence of old_text in a workspace file. Fails on zero or multiple matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1,"maxLength":65536},"new_text":{"type":"string","maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","old_text","new_text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request ExactReplaceRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.ReplaceExact(ctx, request)
+		}},
+		{name: "code.insert_at_anchor", description: "Insert content before or after exactly one anchor in a workspace file. Fails on zero or multiple anchor matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"anchor":{"type":"string","minLength":1,"maxLength":65536},"position":{"type":"string","enum":["before","after"]},"content":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","anchor","position","content"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request AnchorInsertRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.InsertAtAnchor(ctx, request)
+		}},
+		{name: "code.delete_exact", description: "Delete exactly one occurrence of text from a workspace file. Fails on zero or multiple matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+			var request ExactDeleteRequest
+			if err := json.Unmarshal(call.Arguments, &request); err != nil {
+				return nil, err
+			}
+			return service.DeleteExact(ctx, request)
+		}},
+	}
 }
 
 type toolAdapter struct {

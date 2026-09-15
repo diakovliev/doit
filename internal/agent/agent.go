@@ -20,7 +20,9 @@ import (
 
 // defaultMaxRounds allows repository inspections to gather context across
 // several bounded tool calls without permitting an unbounded agent loop.
-const defaultMaxRounds = 32
+const defaultMaxRounds = 128
+
+const maxVerbosePublicText = 240
 
 // ApprovalFunc handles confirmation-required tool actions.
 type ApprovalFunc func(context.Context, policy.Action, tools.Call) (bool, error)
@@ -75,6 +77,7 @@ type Runner struct {
 	MaxRounds int
 	Progress  ProgressFunc
 	Streaming bool
+	Verbose   bool
 }
 
 // Run executes a model/tool loop and persists its lifecycle events.
@@ -167,7 +170,11 @@ func (runner *Runner) requestRound(ctx context.Context, request *model.Request, 
 		runner.emit(ProgressEvent{Phase: "session", Message: "session usage threshold reached; continuing with bounded context and session.history"})
 		*budgetNotified = true
 	}
-	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("requesting model response (round %d)", round+1), Round: round + 1})
+	message := "thinking about the next action"
+	if round > 0 {
+		message = "thinking after tool results"
+	}
+	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("%s (round %d)", message, round+1), Round: round + 1})
 	return runner.createResponse(ctx, *request)
 }
 
@@ -177,13 +184,21 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 	if err := runner.appendEvent(ctx, sessionID, "model_message", response); err != nil {
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, err
 	}
+	if runner.Verbose {
+		runner.emit(ProgressEvent{Phase: "model", Message: verboseResponseMessage(response)})
+		if response.Text != "" {
+			runner.emit(ProgressEvent{Phase: "model", Message: "public model text: " + publicTextPreview(response.Text)})
+		}
+	}
 	if response.Status == "failed" || response.Status == "incomplete" || response.Status == "cancelled" {
 		err := apperr.New(apperr.KindBackend, "agent.response", "model response status: "+response.Status)
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, runner.failSession(ctx, sessionID, err)
 	}
 	if len(response.ToolCalls) > 0 {
+		runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("selected %d tool action(s)", len(response.ToolCalls))})
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, nil
 	}
+	runner.emit(ProgressEvent{Phase: "model", Message: "finished composing public response"})
 	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
 	if err := runner.completeSession(ctx, sessionID, outcome); err != nil {
 		return outcome, false, err
@@ -207,19 +222,50 @@ func (runner *Runner) createResponse(ctx context.Context, request model.Request)
 func (runner *Runner) createModelResponse(ctx context.Context, request model.Request) (model.Response, error) {
 	if runner.Streaming {
 		if client, ok := runner.Client.(model.StreamingModelClient); ok {
-			response, err := client.CreateStream(ctx, request, func(event model.StreamEvent) error {
-				if event.Text != "" {
-					runner.emit(ProgressEvent{Phase: "model", Message: "streaming model output"})
-				}
-				return nil
-			})
-			if err == nil || !streamingFallbackAllowed(ctx, err) {
-				return response, err
-			}
-			return runner.Client.Create(ctx, request)
+			return runner.createStreamingResponse(ctx, client, request)
 		}
 	}
 	return runner.Client.Create(ctx, request)
+}
+
+func (runner *Runner) createStreamingResponse(ctx context.Context, client model.StreamingModelClient, request model.Request) (model.Response, error) {
+	announced := false
+	response, err := client.CreateStream(ctx, request, func(event model.StreamEvent) error {
+		if runner.Verbose && event.Type != "" {
+			runner.emit(ProgressEvent{Phase: "model", Message: "stream event " + event.Type})
+		}
+		if event.Text != "" && !announced {
+			runner.emit(ProgressEvent{Phase: "model", Message: "composing public response"})
+			announced = true
+		}
+		if runner.Verbose && event.Text != "" {
+			runner.emit(ProgressEvent{Phase: "model", Message: "public model text: " + publicTextPreview(event.Text)})
+		}
+		return nil
+	})
+	if err == nil || !streamingFallbackAllowed(ctx, err) {
+		return response, err
+	}
+	return runner.Client.Create(ctx, request)
+}
+
+func verboseResponseMessage(response model.Response) string {
+	message := fmt.Sprintf("public response status=%s id=%s tool_calls=%d", response.Status, response.ID, len(response.ToolCalls))
+	if response.RequestID != "" {
+		message += " request_id=" + response.RequestID
+	}
+	if response.ProviderRequestID != "" {
+		message += " provider_request_id=" + response.ProviderRequestID
+	}
+	return message
+}
+
+func publicTextPreview(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > maxVerbosePublicText {
+		return text[:maxVerbosePublicText] + "..."
+	}
+	return text
 }
 
 func streamingFallbackAllowed(ctx context.Context, err error) bool {

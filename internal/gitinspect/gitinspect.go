@@ -147,10 +147,15 @@ type StatusRequest struct {
 
 // StatusEntry describes one Git path state.
 type StatusEntry struct {
-	Index    string `json:"index"`
-	Worktree string `json:"worktree"`
-	Path     string `json:"path"`
-	Original string `json:"original,omitempty"`
+	Index          string `json:"index"`
+	Worktree       string `json:"worktree"`
+	Path           string `json:"path"`
+	Original       string `json:"original,omitempty"`
+	Change         string `json:"change"`
+	Staged         bool   `json:"staged"`
+	WorktreeChange bool   `json:"worktree_change"`
+	Deleted        bool   `json:"deleted"`
+	Untracked      bool   `json:"untracked"`
 }
 
 // StatusResponse contains structured porcelain status.
@@ -194,7 +199,7 @@ func (service *Service) StatusSummary(ctx context.Context) (string, error) {
 	}
 	lines := make([]string, 0, len(status.Entries))
 	for _, entry := range status.Entries {
-		lines = append(lines, entry.Index+entry.Worktree+" "+entry.Path)
+		lines = append(lines, statusSummaryLine(entry))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -595,6 +600,8 @@ type CommitResponse struct {
 	Hash      string           `json:"hash"`
 	Message   string           `json:"message"`
 	Paths     []string         `json:"paths"`
+	Staged    []string         `json:"staged,omitempty"`
+	Deleted   []string         `json:"deleted,omitempty"`
 	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
@@ -633,6 +640,10 @@ func (service *Service) commitPathsWithMessage(ctx context.Context, paths []stri
 	if len(staged) == 0 {
 		return CommitResponse{}, service.noSelectedChangesError(ctx, paths)
 	}
+	deleted, err := service.deletedStatusPaths(ctx, paths)
+	if err != nil {
+		return CommitResponse{}, err
+	}
 	arguments := append([]string{"commit", "-m", message, "--"}, paths...)
 	if _, err := service.run(ctx, arguments...); err != nil {
 		return CommitResponse{}, err
@@ -649,7 +660,27 @@ func (service *Service) commitPathsWithMessage(ctx context.Context, paths []stri
 	if err != nil {
 		return CommitResponse{}, err
 	}
-	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths, ChangeSet: changeSet}, nil
+	return CommitResponse{Hash: strings.TrimSpace(hash), Message: message, Paths: paths, Staged: staged, Deleted: deleted, ChangeSet: changeSet}, nil
+}
+
+func (service *Service) deletedStatusPaths(ctx context.Context, paths []string) ([]string, error) {
+	status, err := service.Status(ctx, StatusRequest{})
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		selected[path] = struct{}{}
+	}
+	deleted := make([]string, 0)
+	for _, entry := range status.Entries {
+		if entry.Deleted && entry.Staged {
+			if _, ok := selected[entry.Path]; ok {
+				deleted = append(deleted, entry.Path)
+			}
+		}
+	}
+	return deleted, nil
 }
 
 // RestoreRequest selects paths and the local state to restore.
@@ -717,8 +748,28 @@ func (service *Service) stagedPaths(ctx context.Context, paths []string) ([]stri
 }
 
 func (service *Service) stagePaths(ctx context.Context, paths []string) error {
-	arguments := append([]string{"add", "--"}, paths...)
-	_, err := service.run(ctx, arguments...)
+	status, err := service.Status(ctx, StatusRequest{})
+	if err != nil {
+		return err
+	}
+	stagedDeletions := make(map[string]struct{})
+	for _, entry := range status.Entries {
+		if entry.Deleted && entry.Staged && !entry.WorktreeChange {
+			stagedDeletions[entry.Path] = struct{}{}
+		}
+	}
+	pathsToStage := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, alreadyStaged := stagedDeletions[path]; alreadyStaged {
+			continue
+		}
+		pathsToStage = append(pathsToStage, path)
+	}
+	if len(pathsToStage) == 0 {
+		return nil
+	}
+	arguments := append([]string{"add", "--all", "--"}, pathsToStage...)
+	_, err = service.run(ctx, arguments...)
 	return err
 }
 
@@ -818,7 +869,7 @@ func gitReadAdapters(service *Service) []toolAdapter {
 			var request WorktreeRequest
 			return service.Worktrees(ctx, request)
 		}},
-		{name: "git.status", description: "Inspect bounded staged and worktree status.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"include_ignored":{"type":"boolean"}}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.status", description: "Inspect bounded Git status. Deleted paths are reported explicitly; use their exact path when staging or committing a deletion.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"include_ignored":{"type":"boolean"}}}`, risk: tools.RiskReadOnly, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StatusRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -865,7 +916,7 @@ func gitReadAdapters(service *Service) []toolAdapter {
 
 func gitMutationAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "git.stage", description: "Stage explicit workspace paths for a later commit.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.stage", description: "Stage explicit workspace paths for a later commit, including tracked deleted paths. Use the exact path reported by git.status.", parameters: `{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`, risk: tools.RiskWrite, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request StageRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -879,7 +930,7 @@ func gitMutationAdapters(service *Service) []toolAdapter {
 			}
 			return service.Unstage(ctx, request)
 		}},
-		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Validate the selected diff before calling this tool.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "git.commit", description: "Stage and commit only explicit workspace paths with a required message. Include tracked deletions by passing their exact git.status paths; the result reports staged and deleted paths.", parameters: `{"type":"object","properties":{"message":{"type":"string","maxLength":2000},"paths":{"type":"array","items":{"type":"string"}}},"required":["message","paths"]}`, risk: tools.RiskDestructive, changedPaths: gitPathsChangedPaths, changeSet: gitChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request CommitRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -1002,6 +1053,11 @@ func parsePorcelainStatus(output string) []StatusEntry {
 			continue
 		}
 		entry := StatusEntry{Index: record[:1], Worktree: record[1:2], Path: record[3:]}
+		entry.Change = statusChange(entry.Index, entry.Worktree)
+		entry.Staged = entry.Index != " " && entry.Index != "?"
+		entry.WorktreeChange = entry.Worktree != " " && entry.Worktree != "?"
+		entry.Deleted = entry.Index == "D" || entry.Worktree == "D"
+		entry.Untracked = entry.Index == "?" && entry.Worktree == "?"
 		if entry.Index == "R" || entry.Worktree == "R" {
 			parts := strings.SplitN(entry.Path, "\x00", 2)
 			entry.Path = parts[0]
@@ -1012,6 +1068,48 @@ func parsePorcelainStatus(output string) []StatusEntry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func statusChange(index, worktree string) string {
+	if index == "?" && worktree == "?" {
+		return "untracked"
+	}
+	for _, value := range []string{index, worktree} {
+		switch value {
+		case "D":
+			return "deleted"
+		case "R":
+			return "renamed"
+		case "C":
+			return "copied"
+		case "A":
+			return "added"
+		case "M":
+			return "modified"
+		case "U":
+			return "conflicted"
+		}
+	}
+	return "changed"
+}
+
+func statusSummaryLine(entry StatusEntry) string {
+	labels := entry.Change
+	if entry.Deleted {
+		labels += " " + deletionStageLabel(entry)
+	}
+	return labels + " " + entry.Path
+}
+
+func deletionStageLabel(entry StatusEntry) string {
+	switch {
+	case entry.Staged && entry.WorktreeChange:
+		return "(staged+worktree)"
+	case entry.Staged:
+		return "(staged)"
+	default:
+		return "(worktree)"
+	}
 }
 
 func parseWorktrees(output string) []WorktreeEntry {
