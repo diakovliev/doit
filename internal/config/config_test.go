@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,6 +130,23 @@ func TestBackendProfileValidation(t *testing.T) {
 	profile.Model = ""
 	if err := profile.Validate(); err == nil {
 		t.Fatal("expected missing model to fail")
+	}
+}
+
+func TestBackendProfileAcceptsReasoningRequestParameters(t *testing.T) {
+	profile := BackendProfile{
+		APIRoot: "https://example.test/v1",
+		Model:   "model",
+		RequestParameters: map[string]json.RawMessage{
+			"reasoning": json.RawMessage(`{"effort":"high"}`),
+		},
+	}
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("expected reasoning request parameters to validate: %v", err)
+	}
+	profile.RequestParameters["model"] = json.RawMessage(`"unsafe-override"`)
+	if err := profile.Validate(); err == nil {
+		t.Fatal("expected core request override to be rejected")
 	}
 }
 

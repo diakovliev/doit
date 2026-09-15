@@ -18,12 +18,13 @@ import (
 
 // BackendProfile selects one OpenAI-compatible model backend.
 type BackendProfile struct {
-	APIRoot   string            `json:"api_root"`
-	Model     string            `json:"model"`
-	Streaming bool              `json:"streaming,omitempty"`
-	APIKeyEnv string            `json:"api_key_env,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	RateLimit RateLimitConfig   `json:"rate_limit,omitempty"`
+	APIRoot           string                     `json:"api_root"`
+	Model             string                     `json:"model"`
+	Streaming         bool                       `json:"streaming,omitempty"`
+	APIKeyEnv         string                     `json:"api_key_env,omitempty"`
+	Headers           map[string]string          `json:"headers,omitempty"`
+	RequestParameters map[string]json.RawMessage `json:"request_parameters,omitempty"`
+	RateLimit         RateLimitConfig            `json:"rate_limit,omitempty"`
 }
 
 // RateLimitConfig controls bounded client-side retries after provider throttling.
@@ -253,7 +254,34 @@ func (profile BackendProfile) Validate() error {
 	if profile.Model == "" {
 		return apperr.New(apperr.KindConfig, "config.profile", "model is required")
 	}
+	return validateRequestParameters(profile.RequestParameters)
+}
+
+func validateRequestParameters(parameters map[string]json.RawMessage) error {
+	if len(parameters) > 32 {
+		return apperr.New(apperr.KindConfig, "config.profile", "request_parameters are limited to 32 entries")
+	}
+	for name, value := range parameters {
+		if name == "" || strings.ContainsAny(name, "\r\n") {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter names must be non-empty and single-line")
+		}
+		if reservedRequestParameter(name) {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter cannot override core request field: "+name)
+		}
+		if len(value) == 0 || len(value) > 16*1024 || !json.Valid(value) {
+			return apperr.New(apperr.KindConfig, "config.profile", "request parameter value is invalid or oversized: "+name)
+		}
+	}
 	return nil
+}
+
+func reservedRequestParameter(name string) bool {
+	switch name {
+	case "model", "instructions", "input", "tools", "tool_choice", "max_output_tokens", "stream":
+		return true
+	default:
+		return false
+	}
 }
 
 func readFileConfig(filePath string) (fileConfig, error) {
