@@ -59,6 +59,33 @@ func TestRunnerUsesConfiguredStreamingClient(t *testing.T) {
 	}
 }
 
+func TestRunnerEmitsPublicModelProgress(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	var events []ProgressEvent
+	runner.Progress = func(event ProgressEvent) { events = append(events, event) }
+	runner.Verbose = true
+	if _, err := runner.Run(context.Background(), Task{Command: "run", Request: "progress", Workspace: root, Model: "test-model"}); err != nil {
+		t.Fatalf("run progress task: %v", err)
+	}
+	assertProgressMessage(t, events, "thinking about the next action")
+	assertProgressMessage(t, events, "selected 1 tool action(s)")
+	assertProgressMessage(t, events, "finished composing public response")
+	assertProgressMessage(t, events, "public response status=in_progress")
+	assertProgressMessage(t, events, "public model text: finished")
+}
+
+func assertProgressMessage(t *testing.T, events []ProgressEvent, expected string) {
+	t.Helper()
+	for _, event := range events {
+		if strings.Contains(event.Message, expected) {
+			return
+		}
+	}
+	t.Fatalf("progress message %q was not emitted: %+v", expected, events)
+}
+
 func TestRunnerFallsBackWhenStreamingIsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
