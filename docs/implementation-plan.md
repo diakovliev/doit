@@ -217,7 +217,13 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | ID | Work item | Depends on | Done when | Status |
 | --- | --- | --- | --- | --- |
 | `TOOL-010` | Add language-agnostic exact-match editing primitives for small models. | `TOOL-008`, `HARD-004`, `AGENT-003` | `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact` reject ambiguous matches, support expected hashes and dry-run previews, recheck files before apply, write atomically, and return normalized change-set evidence. | `DONE` |
-| `TOOL-011` | Improve model-facing tool semantics and workflow guidance. | `FOUND-004`, `CONTEXT-001`, `TOOL-005`, `TOOL-010` | Mutation and Git tool schemas describe defaults, sequencing, conflicts, deletion semantics, previews, and result evidence; conditional context guidance reduces repeated invalid calls without expanding every request. | `DONE` |
+| `TOOL-011` | Improve model-facing tool semantics and workflow guidance. | `FOUND-004`, `CONTEXT-001`, `TOOL-005`, `TOOL-010` | Mutation and Git tool schemas describe defaults, sequencing, conflicts, deletion semantics, previews, and result evidence; conditional context guidance reduces repeated invalid calls without expanding every request; the small-edit profile narrows the model choice space. | `DONE` |
+
+## Phase 9: Approximate Discovery
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `TOOL-012` | Add bounded fuzzy workspace discovery. | `TOOL-001`, `TOOL-009`, `FOUND-004` | `fs.fuzzy_search` ranks path and content candidates through a pinned dependency, preserves workspace and ignore boundaries, reports match kind/score/indexes, enforces candidate and scan limits, supports deterministic ordering and cancellation, and remains read-only. | `DONE` |
 
 ## Progress Log
 
@@ -300,3 +306,5 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | 2026-09-15 | `TOOL-010` | Added language-agnostic `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact` operations with unique-match enforcement, dry-run previews, stale-hash rejection, atomic rooted writes, and change-set evidence for small-model editing. | Focused codetools tests, lint, gosec, and full repository validation matrix passed |
 | 2026-09-15 | `TOOL-005`, `GIT-001` | Made tracked deletions explicit in structured Git status and summaries, made repeated deletion staging idempotent, and returned deleted paths in commit results so small models can include removals reliably. | Focused deleted-file stage/commit regression and full repository validation matrix passed |
 | 2026-09-15 | `TOOL-011` | Tightened model-facing descriptions and schemas for filesystem, Git, patch, structured edit, and process tools; added conditional inspect-preview-apply guidance to model context so small models receive sequencing and conflict recovery semantics without unnecessary prompt bulk. | Focused context/tool tests and full repository validation matrix passed |
+| 2026-09-15 | `TOOL-011` | Added structured diagnostic codes, retryability, next actions, the `small-edit` capability profile, and code.rename change-set evidence for consistent model recovery and review. | Focused tools/codetools tests, lint, and gosec passed; full repository validation matrix pending |
+| 2026-09-15 | `TOOL-012` | Added `fs.fuzzy_search` with pinned `sahilm/fuzzy` ranking over bounded path/content candidates, explicit target selection, rune match indexes, case filtering, ignore/glob/path confinement, scan limits, truncation metadata, and read-only tool registration. | Focused workspacefs tests, lint, and gosec passed; `go test ./...`, `go vet ./...`, `gofmt -l`, `golangci-lint run`, `gosec ./...`, and `git diff --check` passed |
