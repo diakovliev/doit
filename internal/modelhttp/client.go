@@ -29,6 +29,7 @@ const maxErrorBodyBytes = 16 * 1024
 // Options configures transport, token estimation, and rate-limit behavior.
 type Options struct {
 	HTTPClient   *http.Client
+	Timeout      time.Duration
 	TokenCounter usage.TokenCounter
 	APIKey       string
 	RateLimit    *RateLimitPolicy
@@ -78,7 +79,11 @@ func New(profile config.BackendProfile, options Options) (*Client, error) {
 	}
 	httpClient := options.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 60 * time.Second}
+		timeout := options.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Minute
+		}
+		httpClient = &http.Client{Timeout: timeout}
 	}
 	counter := options.TokenCounter
 	if counter == nil {

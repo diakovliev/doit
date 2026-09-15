@@ -30,6 +30,16 @@ func TestClientNormalizesTextFunctionCallsAndProviderUsage(t *testing.T) {
 	requireProviderUsage(t, response.Usage)
 }
 
+func TestClientUsesConfiguredRequestTimeout(t *testing.T) {
+	client, err := New(config.BackendProfile{APIRoot: "https://example.test/v1", Model: "test-model"}, Options{Timeout: 17 * time.Minute})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client.httpClient.Timeout != 17*time.Minute {
+		t.Fatalf("unexpected request timeout: %s", client.httpClient.Timeout)
+	}
+}
+
 func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Accept") != "text/event-stream" {
