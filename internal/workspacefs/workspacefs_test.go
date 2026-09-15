@@ -50,6 +50,76 @@ func TestSearchSupportsRegexCaseAndContext(t *testing.T) {
 	}
 }
 
+func TestFuzzySearchRanksPathAndContentMatches(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "contextbuilder"), 0700); err != nil {
+		t.Fatalf("make source directory: %v", err)
+	}
+	writeWorkspaceFile(t, filepath.Join(root, "internal", "contextbuilder", "context.go"), "type ContextBuilder struct{}\n")
+	writeWorkspaceFile(t, filepath.Join(root, "internal", "other.go"), "type Other struct{}\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	assertFuzzyPathMatch(t, service)
+	assertFuzzyContentMatch(t, service)
+}
+
+func assertFuzzyPathMatch(t *testing.T, service *Service) {
+	t.Helper()
+	result, err := service.FuzzySearch(context.Background(), FuzzySearchRequest{Query: "ctxbld", Target: "path", Glob: "*.go"})
+	if err != nil || len(result.Matches) == 0 || result.Matches[0].Path != "internal/contextbuilder/context.go" || result.Matches[0].MatchKind != "path" {
+		t.Fatalf("unexpected fuzzy path result: %+v, error=%v", result, err)
+	}
+}
+
+func assertFuzzyContentMatch(t *testing.T, service *Service) {
+	t.Helper()
+	result, err := service.FuzzySearch(context.Background(), FuzzySearchRequest{Query: "ctxbld", Target: "content", Glob: "*.go"})
+	if err != nil || len(result.Matches) != 1 || result.Matches[0].Path != "internal/contextbuilder/context.go" || result.Matches[0].Line != 1 {
+		t.Fatalf("unexpected fuzzy content result: %+v, error=%v", result, err)
+	}
+	if len(result.Matches[0].MatchedIndexes) != len([]rune("ctxbld")) {
+		t.Fatalf("unexpected fuzzy matched indexes: %+v", result.Matches[0])
+	}
+}
+
+func TestFuzzySearchRespectsCaseAndBounds(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, filepath.Join(root, "first.txt"), "Context\ncontext\n")
+	writeWorkspaceFile(t, filepath.Join(root, "second.txt"), "context\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	caseSensitive := FuzzySearchRequest{Query: "Context", Target: "content", CaseSensitive: true, MaxResults: 1}
+	result, err := service.FuzzySearch(context.Background(), caseSensitive)
+	if err != nil || len(result.Matches) != 1 || result.Matches[0].Text != "Context" || result.Truncated {
+		t.Fatalf("unexpected bounded case-sensitive result: %+v, error=%v", result, err)
+	}
+
+	result, err = service.FuzzySearch(context.Background(), FuzzySearchRequest{Query: "context", Target: "content", MaxCandidates: 1})
+	if err != nil || result.ScannedCandidates != 1 || !result.Truncated {
+		t.Fatalf("unexpected candidate bound result: %+v, error=%v", result, err)
+	}
+}
+
+func TestFuzzySearchSkipsIgnoredFiles(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, filepath.Join(root, ".gitignore"), "ignored.txt\n")
+	writeWorkspaceFile(t, filepath.Join(root, "ignored.txt"), "ContextBuilder\n")
+	writeWorkspaceFile(t, filepath.Join(root, "visible.txt"), "ContextBuilder\n")
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	result, err := service.FuzzySearch(context.Background(), FuzzySearchRequest{Query: "ctxbld", Target: "content"})
+	if err != nil || len(result.Matches) != 1 || result.Matches[0].Path != "visible.txt" {
+		t.Fatalf("unexpected ignored-file result: %+v, error=%v", result, err)
+	}
+}
+
 func TestListAndSearchNestedDocsPath(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "docs"), 0700); err != nil {
@@ -313,8 +383,8 @@ func TestRegisterTools(t *testing.T) {
 	if err := RegisterTools(registry, service); err != nil {
 		t.Fatalf("register filesystem tools: %v", err)
 	}
-	if len(registry.Definitions()) != 9 {
-		t.Fatalf("expected nine filesystem tools, got %d", len(registry.Definitions()))
+	if len(registry.Definitions()) != 10 {
+		t.Fatalf("expected ten filesystem tools, got %d", len(registry.Definitions()))
 	}
 	for _, name := range []string{"fs.write", "fs.move", "fs.mkdir", "fs.remove"} {
 		tool, exists := registry.Lookup(name)
@@ -326,6 +396,15 @@ func TestRegisterTools(t *testing.T) {
 	result := mkdirTool.Execute(context.Background(), tools.Call{Arguments: []byte(`{"path":"adapter-dir"}`)})
 	if result.Status != tools.StatusSucceeded || result.ChangeSet == nil || result.ChangeSet.Operation != "fs.mkdir" {
 		t.Fatalf("filesystem adapter did not expose change set: %+v", result)
+	}
+	assertFuzzyToolContract(t, registry)
+}
+
+func assertFuzzyToolContract(t *testing.T, registry *tools.Registry) {
+	t.Helper()
+	fuzzyTool, exists := registry.Lookup("fs.fuzzy_search")
+	if !exists || fuzzyTool.Definition().Risk != tools.RiskReadOnly || fuzzyTool.Definition().MaxArguments != 11 {
+		t.Fatalf("fuzzy search adapter has incorrect contract: %+v", fuzzyTool.Definition())
 	}
 }
 

@@ -337,7 +337,7 @@ A normalized result has this conceptual shape:
 }
 ```
 
-The actual implementation types may differ, but the status distinction and bounded diagnostics are part of the tool contract. A denied action is not an empty successful result.
+The actual implementation types may differ, but the status distinction and bounded diagnostics are part of the tool contract. Failed and cancelled diagnostics should include a stable `code` when one is available, a `retryable` hint for transient failures, and a concise `next_action` that tells the model how to recover without blindly repeating the same call. A denied action is not an empty successful result.
 
 Model-facing tool descriptions are procedural, not merely labels. Mutation-capable tool definitions should state the prerequisite inspection step, exact argument semantics, preview/dry-run behavior, conflict behavior, and the result fields that prove success. The context builder adds a short workflow reminder only when mutation tools are exposed: inspect first, preview exact edits, re-inspect after conflicts, and pass exact changed paths—including deletions—to Git commit tools. This guidance is deliberately compact so it improves small-model reliability without consuming the full context window.
 
@@ -355,6 +355,7 @@ An MCP server is not implicitly trusted because it speaks the protocol. Server c
 - `fs.stat`: Return file type, size, modification time, permissions, and a content hash when requested.
 - `fs.read`: Read a bounded text range or return safe metadata for binary content. The caller must provide byte or line limits.
 - `fs.search`: Search text, symbols, or paths with a query, path scope, glob, ignore policy, and result limit.
+- `fs.fuzzy_search`: Rank approximate path and content candidates with an explicit target, score, match kind, and bounded candidate/scan limits. Fuzzy results are read-only discovery hints and are never direct edit targets.
 - `fs.hash`: Calculate a bounded file or path-set hash for change detection and patch concurrency checks.
 - `fs.write`: Create or explicitly overwrite one bounded workspace file, with optional parent creation.
 - `fs.move`: Move one workspace file or directory without replacing an existing destination.
@@ -363,6 +364,8 @@ An MCP server is not implicitly trusted because it speaks the protocol. Server c
 
 Filesystem tools must respect project instructions and ignore rules by default. File and directory mutations use rooted workspace operations, reject the workspace root and `.git` metadata, refuse replacement moves, bound direct file writes to 64 KiB, and carry write or destructive risk metadata. Larger or review-sensitive file changes should use `code.apply_patch`. Access to ignored files, `.doit/`, credentials, and files outside the workspace requires an explicit user request and policy approval.
 
+`fs.search` remains the exact literal/regex tool. `fs.fuzzy_search` uses deterministic lexical ranking for uncertain filenames, code symbols, and content lines. Its default target is `path_and_content`; `path`, `content`, and `path_and_content` make the candidate surface explicit. Results expose a higher-is-better score that is meaningful only within the same query, zero-based rune match indexes, and `truncated` plus scan counters. The service bounds query length, result count, candidate count, per-request scan bytes, and context lines. It uses the external `sahilm/fuzzy` matcher only after workspace traversal has applied path confinement, ignore rules, glob filtering, symlink policy, cancellation, and bounded reads.
+
 **Code manipulation** is separate from filesystem reading so every write has a reviewable operation:
 
 - `code.check_patch`: Validate a unified patch without changing files and return the affected paths and conflicts.
@@ -370,7 +373,7 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 - `code.replace_exact`: Replace exactly one occurrence of text in an existing file. Zero or multiple matches are conflicts, not fuzzy-edit opportunities.
 - `code.insert_at_anchor`: Insert content before or after exactly one anchor in an existing file.
 - `code.delete_exact`: Delete exactly one occurrence of text in an existing file.
-- `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
+- `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement; return before/after hashes for both source and destination paths as change-set evidence.
 - `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
 All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch and structured edit operations must support pre-apply preview, exact-match validation, expected-content hashes, immediate pre-apply rechecks, and conflict failure; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
@@ -395,7 +398,7 @@ Git inspection must report the repository root when it differs from the effectiv
 
 The model may select a configured task, parameters, and human-readable per-process timeout such as `5m`, but it may not provide an arbitrary shell pipeline, command concatenation, environment secret, or working directory outside the workspace. Model-selected process timeouts are bounded by the runner's maximum and by any outer CLI deadline. The process runner returns task kind, pass/fail state, exit status, duration, bounded stdout and stderr, timeout/truncation state, and bounded file/line diagnostics when its output follows a recognized diagnostic format. Normalized model responses retain the generated client request ID and provider request ID when the backend supplies one, so persisted session evidence can correlate failures without recording credentials.
 
-The project configuration may set `tool_profile` to `full`, `inspect`, `edit`, `validate`, `git-read`, `git-write`, or `destructive`. A profile limits which registered capabilities are offered to the model; it does not weaken workspace scope checks or authorize capabilities that are not registered.
+The project configuration may set `tool_profile` to `full`, `inspect`, `small-edit`, `edit`, `validate`, `git-read`, `git-write`, or `destructive`. `small-edit` exposes read-only inspection plus `code.check_patch`, `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact`, but not broad patch application, process execution, or Git mutation. A profile limits which registered capabilities are offered to the model; it does not weaken workspace scope checks or authorize capabilities that are not registered.
 
 #### Explicit Git Write Operations
 

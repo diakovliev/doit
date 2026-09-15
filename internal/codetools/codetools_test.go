@@ -114,6 +114,24 @@ func TestRenameRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestRenameReturnsChangeSetEvidence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "before.txt"), []byte("content\n"), 0600); err != nil {
+		t.Fatalf("write source fixture: %v", err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatalf("new code service: %v", err)
+	}
+	result, err := service.Rename(context.Background(), RenameRequest{From: "before.txt", To: "after.txt"})
+	if err != nil || result.ChangeSet == nil || result.ChangeSet.Operation != "code.rename" || result.ChangeSet.State != "applied" {
+		t.Fatalf("rename change set missing: %+v, error=%v", result, err)
+	}
+	if result.ChangeSet.BeforeHashes["before.txt"] == "" || result.ChangeSet.AfterHashes["after.txt"] == "" {
+		t.Fatalf("rename hashes missing: %+v", result.ChangeSet)
+	}
+}
+
 func TestPatchUpdatePreservesUnchangedContent(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "file.txt")
