@@ -400,12 +400,12 @@ The project configuration may set `tool_profile` to `full`, `inspect`, `edit`, `
 Local Git mutations are first-class workspace tools with structured arguments and stronger policy checks:
 
 - `git.stage` and `git.unstage`: Change the index for explicitly selected workspace paths.
-- `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing and never includes unrelated paths.
+- `git.commit`: Stage and create a commit for explicitly selected workspace paths with a required message. The operation validates the selected staged diff before committing, includes tracked deletions when their exact status path is selected, reports staged/deleted paths in its result, and never includes unrelated paths.
 - `git.restore`: Restore explicitly selected paths from the index or `HEAD`; worktree restoration is destructive.
 
 `doit agent` confirms these operations individually. `doit run` is trusted workspace automation and may execute configured local Git operations, including destructive ones, without an interactive prompt; path confinement, Git validation, and review artifacts remain active. Push, fetch, pull, force-push, reset history, rewrite commits, merge branches, switch branches, and remote management require separate capabilities and are not implied by local workspace authorization.
 
-Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials.
+Local Git mutations return change-set evidence based on selected-path Git state before and after the operation. The evidence identifies the operation and paths without storing raw repository contents or credentials. Staging is idempotent for already-staged tracked deletions so a separate `git.stage` followed by `git.commit` does not lose or reject the deletion.
 
 ### 4.6 Approval and Safety Policy
 

@@ -373,7 +373,7 @@ Git inspection and local operations:
 - `git.branch`
 - `git.worktree`
 
-Local Git mutations are explicit and workspace-scoped. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
+Local Git mutations are explicit and workspace-scoped. Use `git.status` first: tracked deletions are labeled `deleted` and include their exact path. Pass that exact deleted path to `git.stage` or `git.commit`; repeated staging is safe, and commit results report the deleted paths included. Use `git.stage` when you want a separate preview step, or use `git.commit` to stage and commit an explicit path group atomically after validating its diff. `git.restore` supports `worktree`, `staged`, and `head` modes and can discard local changes. `git.branch` reports branch/upstream divergence, and `git.worktree` lists local worktrees. Agent mode asks for approval; `doit run` can automate configured local operations. Remote operations and arbitrary Git command composition are not exposed.
 
 Code and validation:
 
