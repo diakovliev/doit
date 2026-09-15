@@ -775,7 +775,8 @@ func (service *Service) Remove(ctx context.Context, request RemoveRequest) (Remo
 
 // RegisterTools exposes the filesystem service through the normalized tool registry.
 func RegisterTools(registry *tools.Registry, service *Service) error {
-	definitions := append(readOnlyAdapters(service), mutationAdapters(service)...)
+	definitions := append(readOnlyAdapters(service), fuzzySearchAdapter(service))
+	definitions = append(definitions, mutationAdapters(service)...)
 	return registerToolAdapters(registry, definitions)
 }
 
