@@ -37,8 +37,11 @@ const (
 
 // Diagnostic is bounded, user-visible tool information.
 type Diagnostic struct {
-	Level   string `json:"level"`
-	Message string `json:"message"`
+	Level      string `json:"level"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 // Definition describes a registered tool and its policy metadata.
@@ -151,7 +154,7 @@ func (registry *Registry) Select(profile string) (*Registry, error) {
 
 func validProfile(profile string) bool {
 	switch profile {
-	case "full", "inspect", "edit", "validate", "git-read", "git-write", "destructive":
+	case "full", "inspect", "small-edit", "edit", "validate", "git-read", "git-write", "destructive":
 		return true
 	default:
 		return false
@@ -159,25 +162,39 @@ func validProfile(profile string) bool {
 }
 
 func profileAllows(profile string, definition Definition) bool {
-	if profile == "full" {
-		return true
+	matcher, exists := profileMatchers[profile]
+	if !exists {
+		return false
 	}
-	if profile == "destructive" {
-		return definition.Risk == RiskDestructive
-	}
-	if profile == "git-read" {
+	return matcher(definition)
+}
+
+var profileMatchers = map[string]func(Definition) bool{
+	"full":        func(Definition) bool { return true },
+	"destructive": func(definition Definition) bool { return definition.Risk == RiskDestructive },
+	"git-read": func(definition Definition) bool {
 		return strings.HasPrefix(definition.Name, "git.") && definition.Risk == RiskReadOnly
-	}
-	if profile == "git-write" {
-		return strings.HasPrefix(definition.Name, "git.")
-	}
-	if profile == "inspect" {
-		return definition.Risk == RiskReadOnly
-	}
-	if profile == "edit" {
+	},
+	"git-write":  func(definition Definition) bool { return strings.HasPrefix(definition.Name, "git.") },
+	"inspect":    func(definition Definition) bool { return definition.Risk == RiskReadOnly },
+	"small-edit": smallEditAllows,
+	"edit": func(definition Definition) bool {
 		return definition.Risk == RiskReadOnly || definition.Risk == RiskWrite
-	}
-	return definition.Risk == RiskReadOnly || definition.Risk == RiskProcess
+	},
+	"validate": func(definition Definition) bool {
+		return definition.Risk == RiskReadOnly || definition.Risk == RiskProcess
+	},
+}
+
+var smallEditToolNames = map[string]bool{
+	"code.check_patch":      true,
+	"code.replace_exact":    true,
+	"code.insert_at_anchor": true,
+	"code.delete_exact":     true,
+}
+
+func smallEditAllows(definition Definition) bool {
+	return definition.Risk == RiskReadOnly || smallEditToolNames[definition.Name]
 }
 
 type contractTool struct {
@@ -191,7 +208,7 @@ func (tool contractTool) Definition() Definition {
 
 func (tool contractTool) Execute(ctx context.Context, call Call) Result {
 	if err := validateCall(tool.definition, call); err != nil {
-		return Result{Status: StatusFailed, Diagnostics: []Diagnostic{{Level: "error", Message: err.Error()}}}
+		return Result{Status: StatusFailed, Diagnostics: []Diagnostic{diagnosticForError(err)}}
 	}
 	executionContext := ctx
 	if tool.definition.Timeout > 0 {
@@ -206,18 +223,81 @@ func (tool contractTool) Execute(ctx context.Context, call Call) Result {
 		result.Duration = time.Nanosecond
 	}
 	if executionContext.Err() != nil && result.Status == StatusSucceeded {
-		return Result{Status: StatusCancelled, Duration: result.Duration, Diagnostics: []Diagnostic{{Level: "warning", Message: executionContext.Err().Error()}}}
+		return Result{Status: StatusCancelled, Duration: result.Duration, Diagnostics: []Diagnostic{diagnosticForError(executionContext.Err())}}
 	}
+	result.Diagnostics = enrichDiagnostics(result.Diagnostics)
 	if tool.definition.MaxOutputBytes > 0 {
 		encoded, err := json.Marshal(result.Data)
 		if err != nil {
-			return Result{Status: StatusFailed, Diagnostics: []Diagnostic{{Level: "error", Message: "tool output is not serializable"}}}
+			return Result{Status: StatusFailed, Diagnostics: []Diagnostic{diagnosticForError(errors.New("tool output is not serializable"))}}
 		}
 		if len(encoded) > tool.definition.MaxOutputBytes {
-			return Result{Status: StatusFailed, Truncated: true, Duration: result.Duration, Diagnostics: []Diagnostic{{Level: "error", Message: fmt.Sprintf("tool output exceeds %d bytes", tool.definition.MaxOutputBytes)}}}
+			return Result{Status: StatusFailed, Truncated: true, Duration: result.Duration, Diagnostics: []Diagnostic{diagnosticForError(fmt.Errorf("tool output exceeds %d bytes", tool.definition.MaxOutputBytes))}}
 		}
 	}
 	return result
+}
+
+func enrichDiagnostics(diagnostics []Diagnostic) []Diagnostic {
+	for index := range diagnostics {
+		if diagnostics[index].Code == "" {
+			metadata := diagnosticForError(errors.New(diagnostics[index].Message))
+			diagnostics[index].Code = metadata.Code
+			diagnostics[index].Retryable = metadata.Retryable
+			diagnostics[index].NextAction = metadata.NextAction
+		}
+	}
+	return diagnostics
+}
+
+func diagnosticForError(err error) Diagnostic {
+	message := err.Error()
+	lower := strings.ToLower(message)
+	diagnostic := Diagnostic{Level: "error", Code: "tool_error", Message: message}
+	if errors.Is(err, context.Canceled) {
+		diagnostic.Level = "warning"
+		diagnostic.Code = "cancelled"
+		diagnostic.NextAction = "stop; the request was cancelled"
+		return diagnostic
+	}
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "timeout") {
+		diagnostic.Code = "timeout"
+		diagnostic.Retryable = true
+		diagnostic.NextAction = "retry with a longer allowed timeout or a smaller operation"
+		return diagnostic
+	}
+	for _, rule := range diagnosticRules {
+		if containsAny(lower, rule.fragments) {
+			diagnostic.Code = rule.code
+			diagnostic.Retryable = rule.retryable
+			diagnostic.NextAction = rule.nextAction
+			return diagnostic
+		}
+	}
+	return diagnostic
+}
+
+type diagnosticRule struct {
+	code       string
+	fragments  []string
+	retryable  bool
+	nextAction string
+}
+
+var diagnosticRules = []diagnosticRule{
+	{code: "invalid_arguments", fragments: []string{"required tool argument", "at most", "json object"}, nextAction: "use the tool schema and correct the arguments; do not repeat the same call"},
+	{code: "edit_conflict", fragments: []string{"expected exactly one match", "context does not match", "changed since"}, nextAction: "inspect the current file again and retry with a narrower exact match or current hash"},
+	{code: "path_conflict", fragments: []string{"destination already exists", "pathspec"}, nextAction: "inspect current paths and choose an exact non-conflicting path"},
+	{code: "limit_exceeded", fragments: []string{"exceeds", "oversized"}, nextAction: "reduce the requested scope, output, or content size"},
+}
+
+func containsAny(value string, fragments []string) bool {
+	for _, fragment := range fragments {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateCall(definition Definition, call Call) error {

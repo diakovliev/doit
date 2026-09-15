@@ -127,3 +127,45 @@ func TestRegistrySelectsCapabilityProfiles(t *testing.T) {
 		t.Fatal("expected unknown profile to fail")
 	}
 }
+
+func TestRegistrySelectsSmallEditProfile(t *testing.T) {
+	registry := NewRegistry()
+	for _, definition := range []Definition{
+		{Name: "fs.read", Risk: RiskReadOnly},
+		{Name: "code.replace_exact", Risk: RiskWrite},
+		{Name: "code.apply_patch", Risk: RiskWrite},
+		{Name: "process.run", Risk: RiskProcess},
+	} {
+		if err := registry.Register(testTool{definition: definition}); err != nil {
+			t.Fatalf("register %s: %v", definition.Name, err)
+		}
+	}
+	selected, err := registry.Select("small-edit")
+	if err != nil {
+		t.Fatalf("select small-edit profile: %v", err)
+	}
+	if _, exists := selected.Lookup("fs.read"); !exists {
+		t.Fatal("small-edit profile omitted inspection tool")
+	}
+	if _, exists := selected.Lookup("code.replace_exact"); !exists {
+		t.Fatal("small-edit profile omitted exact edit tool")
+	}
+	if _, exists := selected.Lookup("code.apply_patch"); exists {
+		t.Fatal("small-edit profile exposed broad patch tool")
+	}
+	if _, exists := selected.Lookup("process.run"); exists {
+		t.Fatal("small-edit profile exposed process tool")
+	}
+}
+
+func TestRegistryAddsDiagnosticRecoveryMetadata(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(contractTestTool{definition: Definition{Name: "edit", Risk: RiskWrite}, result: Result{Status: StatusFailed, Diagnostics: []Diagnostic{{Level: "error", Message: "expected exactly one match, found 2"}}}}); err != nil {
+		t.Fatalf("register edit tool: %v", err)
+	}
+	tool, _ := registry.Lookup("edit")
+	result := tool.Execute(context.Background(), Call{})
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "edit_conflict" || result.Diagnostics[0].NextAction == "" || result.Diagnostics[0].Retryable {
+		t.Fatalf("missing edit recovery metadata: %+v", result.Diagnostics)
+	}
+}

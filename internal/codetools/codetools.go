@@ -107,8 +107,9 @@ type RenameRequest struct {
 
 // RenameResponse describes the renamed paths.
 type RenameResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From      string           `json:"from"`
+	To        string           `json:"to"`
+	ChangeSet *tools.ChangeSet `json:"change_set,omitempty"`
 }
 
 // Rename moves a path without replacing an existing destination.
@@ -129,15 +130,55 @@ func (service *Service) Rename(ctx context.Context, request RenameRequest) (Rena
 		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
 	}
 	defer func() { _ = root.Close() }()
+	before, after, err := renamePathStates(root, from, to)
+	if err != nil {
+		return RenameResponse{}, err
+	}
+	paths := []string{filepath.ToSlash(from), filepath.ToSlash(to)}
+	changeSet, err := renameChangeSet(paths, before.from, before.fromExists, before.to, before.toExists, after.from, after.fromExists, after.to, after.toExists)
+	if err != nil {
+		return RenameResponse{}, err
+	}
+	return RenameResponse{From: paths[0], To: paths[1], ChangeSet: changeSet}, nil
+}
+
+type renamePathState struct {
+	from       []byte
+	fromExists bool
+	to         []byte
+	toExists   bool
+}
+
+func renamePathStates(root *os.Root, from, to string) (before renamePathState, after renamePathState, err error) {
 	if _, err := root.Stat(to); err == nil {
-		return RenameResponse{}, apperr.New(apperr.KindPolicy, "codetools.rename", "destination already exists")
+		return renamePathState{}, renamePathState{}, apperr.New(apperr.KindPolicy, "codetools.rename", "destination already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+		return renamePathState{}, renamePathState{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+	}
+	before, err = readRenamePathState(root, from, to)
+	if err != nil {
+		return renamePathState{}, renamePathState{}, err
 	}
 	if err := root.Rename(from, to); err != nil {
-		return RenameResponse{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+		return renamePathState{}, renamePathState{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
 	}
-	return RenameResponse{From: filepath.ToSlash(request.From), To: filepath.ToSlash(request.To)}, nil
+	after, err = readRenamePathState(root, from, to)
+	if err != nil {
+		return renamePathState{}, renamePathState{}, err
+	}
+	return before, after, nil
+}
+
+func readRenamePathState(root *os.Root, from, to string) (renamePathState, error) {
+	fromContent, fromExists, err := readSnapshot(root, from)
+	if err != nil {
+		return renamePathState{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+	}
+	toContent, toExists, err := readSnapshot(root, to)
+	if err != nil {
+		return renamePathState{}, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+	}
+	return renamePathState{from: fromContent, fromExists: fromExists, to: toContent, toExists: toExists}, nil
 }
 
 // FormatRequest runs a configured formatter and returns its result.
@@ -181,7 +222,7 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			}
 			return service.ApplyPatch(ctx, request)
 		}},
-		{name: "code.rename", description: "Rename one workspace path without replacing an existing destination. Inspect both paths first; fails on collisions.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: renameChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.rename", description: "Rename one workspace path without replacing an existing destination. Inspect both paths first; fails on collisions and returns a change set.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: renameChangedPaths, changeSet: renameChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RenameRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -274,6 +315,14 @@ func renameChangedPaths(data any) []string {
 		return nil
 	}
 	return []string{response.From, response.To}
+}
+
+func renameChangeSetFromData(data any) *tools.ChangeSet {
+	response, ok := data.(RenameResponse)
+	if !ok {
+		return nil
+	}
+	return response.ChangeSet
 }
 
 func patchChangeSetFromData(data any) *tools.ChangeSet {

@@ -268,6 +268,25 @@ func structuredEditChangeSet(plan structuredEditPlan, state string) (*tools.Chan
 	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: plan.edit.operation, State: state, Paths: []string{path}, BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
 }
 
+func renameChangeSet(paths []string, beforeFrom []byte, beforeFromExists bool, beforeTo []byte, beforeToExists bool, afterFrom []byte, afterFromExists bool, afterTo []byte, afterToExists bool) (*tools.ChangeSet, error) {
+	if len(paths) != 2 {
+		return nil, apperr.New(apperr.KindTool, "codetools.rename", "internal error: rename requires two paths")
+	}
+	beforeHashes := map[string]string{paths[0]: snapshotHash(beforeFrom, beforeFromExists), paths[1]: snapshotHash(beforeTo, beforeToExists)}
+	afterHashes := map[string]string{paths[0]: snapshotHash(afterFrom, afterFromExists), paths[1]: snapshotHash(afterTo, afterToExists)}
+	identity, err := json.Marshal(struct {
+		Operation    string            `json:"operation"`
+		Paths        []string          `json:"paths"`
+		BeforeHashes map[string]string `json:"before_hashes"`
+		AfterHashes  map[string]string `json:"after_hashes"`
+	}{Operation: "code.rename", Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes})
+	if err != nil {
+		return nil, apperr.Wrap(apperr.KindTool, "codetools.rename", err)
+	}
+	digest := sha256.Sum256(identity)
+	return &tools.ChangeSet{ID: hex.EncodeToString(digest[:]), Operation: "code.rename", State: "applied", Paths: paths, BeforeHashes: beforeHashes, AfterHashes: afterHashes}, nil
+}
+
 func structuredEditChangedPaths(data any) []string {
 	response, ok := data.(StructuredEditResponse)
 	if !ok || !response.Changed {
