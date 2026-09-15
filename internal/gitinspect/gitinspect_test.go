@@ -166,6 +166,66 @@ func TestGitCommitReportsCurrentPathsWhenSelectionIsClean(t *testing.T) {
 	}
 }
 
+func TestGitDeletedPathIsExplicitAndIncludedInCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := newGitFixture(t)
+	service, err := New(root)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "entry.txt")); err != nil {
+		t.Fatalf("delete fixture file: %v", err)
+	}
+	assertDeletedStatus(t, service, false)
+	stageDeletedPath(t, service)
+	assertDeletedStatus(t, service, true)
+	commitDeletedPath(t, service)
+	status, err := service.Status(context.Background(), StatusRequest{})
+	if err != nil {
+		t.Fatalf("status after deletion commit: %v", err)
+	}
+	for _, entry := range status.Entries {
+		if entry.Path == "entry.txt" {
+			t.Fatalf("deleted path remains in status after commit: %+v", entry)
+		}
+	}
+}
+
+func stageDeletedPath(t *testing.T, service *Service) {
+	t.Helper()
+	stage, err := service.Stage(context.Background(), StageRequest{Paths: []string{"entry.txt"}})
+	if err != nil || len(stage.Staged) != 1 || stage.Staged[0] != "entry.txt" {
+		t.Fatalf("deleted path was not staged explicitly: %+v, error=%v", stage, err)
+	}
+}
+
+func commitDeletedPath(t *testing.T, service *Service) {
+	t.Helper()
+	commit, err := service.Commit(context.Background(), CommitRequest{Message: "remove entry", Paths: []string{"entry.txt"}})
+	if err != nil || len(commit.Deleted) != 1 || commit.Deleted[0] != "entry.txt" {
+		t.Fatalf("deleted path was not reported in commit: %+v, error=%v", commit, err)
+	}
+}
+
+func assertDeletedStatus(t *testing.T, service *Service, staged bool) {
+	t.Helper()
+	status, err := service.Status(context.Background(), StatusRequest{})
+	if err != nil {
+		t.Fatalf("read deleted status: %v", err)
+	}
+	for _, entry := range status.Entries {
+		if entry.Path == "entry.txt" {
+			if entry.Change != "deleted" || !entry.Deleted || entry.Staged != staged || entry.WorktreeChange == staged {
+				t.Fatalf("unexpected deleted status: %+v", entry)
+			}
+			return
+		}
+	}
+	t.Fatalf("deleted path missing from status, staged=%t: %+v", staged, status)
+}
+
 func TestGitToolsRegisterLocalMutationCapabilities(t *testing.T) {
 	service, err := New(t.TempDir())
 	if err != nil {
