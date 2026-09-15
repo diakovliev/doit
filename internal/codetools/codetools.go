@@ -167,21 +167,21 @@ func (service *Service) Format(ctx context.Context, request FormatRequest) (Form
 // RegisterTools exposes code operations through the normalized registry.
 func RegisterTools(registry *tools.Registry, service *Service) error {
 	adapters := []toolAdapter{
-		{name: "code.check_patch", description: "Validate a file patch without changing files. Use the exact patch format: *** Update File: path followed by patch lines. Do not wrap the patch in markdown fences.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskReadOnly, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.check_patch", description: "Preview a patch without changing files. Inspect with fs.read/fs.hash or git.diff first; returns affected paths, conflicts, hashes, and a preview change set.", parameters: `{"type":"object","properties":{"patch":{"type":"string","minLength":1},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean","default":true}},"required":["patch"]}`, risk: tools.RiskReadOnly, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.CheckPatch(ctx, request)
 		}},
-		{name: "code.apply_patch", description: "Apply a validated file patch inside the workspace. Use the exact patch format: *** Update File: path followed by context, - removed, and + added lines. Do not describe the patch; call this tool with the patch string.", parameters: `{"type":"object","properties":{"patch":{"type":"string"},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean"}},"required":["patch"]}`, risk: tools.RiskWrite, changedPaths: patchChangedPaths, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.apply_patch", description: "Apply a patch only after inspecting or previewing it. Use exact *** Add/Update/Delete File blocks; do not use markdown fences. expected_hashes prevents overwriting a file changed after inspection. dry_run=true previews only; conflicts fail without partial writes.", parameters: `{"type":"object","properties":{"patch":{"type":"string","minLength":1},"expected_hashes":{"type":"object","additionalProperties":{"type":"string"}},"dry_run":{"type":"boolean","default":false}},"required":["patch"]}`, risk: tools.RiskWrite, changedPaths: patchChangedPaths, changeSet: patchChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request PatchRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.ApplyPatch(ctx, request)
 		}},
-		{name: "code.rename", description: "Rename one workspace path after approval.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: renameChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.rename", description: "Rename one workspace path without replacing an existing destination. Inspect both paths first; fails on collisions.", parameters: `{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}`, risk: tools.RiskWrite, changedPaths: renameChangedPaths, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request RenameRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
@@ -207,21 +207,21 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 
 func structuredEditAdapters(service *Service) []toolAdapter {
 	return []toolAdapter{
-		{name: "code.replace_exact", description: "Replace exactly one occurrence of old_text in a workspace file. Fails on zero or multiple matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1,"maxLength":65536},"new_text":{"type":"string","maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","old_text","new_text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.replace_exact", description: "Small-model edit: inspect/hash first, then replace exactly one old_text occurrence. Zero or multiple matches are conflicts, never fuzzy matches. Use dry_run=true first; expected_hash prevents stale edits.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1,"maxLength":65536},"new_text":{"type":"string","maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean","default":false}},"required":["path","old_text","new_text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ExactReplaceRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.ReplaceExact(ctx, request)
 		}},
-		{name: "code.insert_at_anchor", description: "Insert content before or after exactly one anchor in a workspace file. Fails on zero or multiple anchor matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"anchor":{"type":"string","minLength":1,"maxLength":65536},"position":{"type":"string","enum":["before","after"]},"content":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","anchor","position","content"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.insert_at_anchor", description: "Small-model edit: inspect/hash first, then insert before or after exactly one anchor. Zero or multiple anchors are conflicts. Use dry_run=true first; expected_hash prevents stale edits.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"anchor":{"type":"string","minLength":1,"maxLength":65536},"position":{"type":"string","enum":["before","after"]},"content":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean","default":false}},"required":["path","anchor","position","content"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request AnchorInsertRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
 			}
 			return service.InsertAtAnchor(ctx, request)
 		}},
-		{name: "code.delete_exact", description: "Delete exactly one occurrence of text from a workspace file. Fails on zero or multiple matches; use dry_run=true to preview.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["path","text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
+		{name: "code.delete_exact", description: "Small-model edit: inspect/hash first, then delete exactly one text occurrence. Zero or multiple matches are conflicts; use dry_run=true first.", parameters: `{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":65536},"expected_hash":{"type":"string"},"dry_run":{"type":"boolean","default":false}},"required":["path","text"]}`, risk: tools.RiskWrite, changedPaths: structuredEditChangedPaths, changeSet: structuredEditChangeSetFromData, execute: func(ctx context.Context, call tools.Call) (any, error) {
 			var request ExactDeleteRequest
 			if err := json.Unmarshal(call.Arguments, &request); err != nil {
 				return nil, err
