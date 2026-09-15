@@ -212,6 +212,12 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | --- | --- | --- | --- | --- |
 | `MODEL-003` | Configure provider request parameters and safe public model diagnostics. | `MODEL-002`, `CLI-001`, `FOUND-002` | Backend profiles can send bounded structured `request_parameters` such as Responses reasoning effort without overriding core fields; `--verbose` reports response metadata, stream event types, and explicitly returned public model text while never exposing hidden reasoning; relaxed execution limits remain bounded and configurable. | `DONE` |
 
+## Phase 8: Robust Editing
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `TOOL-010` | Add language-agnostic exact-match editing primitives for small models. | `TOOL-008`, `HARD-004`, `AGENT-003` | `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact` reject ambiguous matches, support expected hashes and dry-run previews, recheck files before apply, write atomically, and return normalized change-set evidence. | `DONE` |
+
 ## Progress Log
 
 | Date | Task ID | Change | Evidence |
@@ -290,3 +296,4 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | 2026-09-15 | `CLI-001`, `MODEL-002`, `TOOL-003` | Added safe public model-progress labels for thinking, response composition, and tool selection; added relaxed configurable request timeout, 128-round default, 2-minute process default, and 30-minute process maximum while retaining caller deadlines and bounded execution. | Focused agent/model/process/config/app tests and full repository validation matrix passed |
 | 2026-09-15 | `CLI-001`, `MODEL-002` | Activated `--verbose` as a bounded public diagnostic trace for response IDs, statuses, usage correlation, stream event types, and explicitly returned public model text; hidden chain-of-thought remains unavailable by design. | Focused agent/app tests and full repository validation matrix passed |
 | 2026-09-15 | `MODEL-003` | Added bounded profile `request_parameters` for provider-specific controls such as `reasoning.effort`, reserved core-field protection, and configuration/request regression coverage. | Focused config/model HTTP tests and full repository validation matrix passed |
+| 2026-09-15 | `TOOL-010` | Added language-agnostic `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact` operations with unique-match enforcement, dry-run previews, stale-hash rejection, atomic rooted writes, and change-set evidence for small-model editing. | Focused codetools tests, lint, gosec, and full repository validation matrix passed |

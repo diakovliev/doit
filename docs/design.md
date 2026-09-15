@@ -365,10 +365,13 @@ Filesystem tools must respect project instructions and ignore rules by default. 
 
 - `code.check_patch`: Validate a unified patch without changing files and return the affected paths and conflicts.
 - `code.apply_patch`: Create, update, or delete files from a validated patch. It must support preview, atomic per-file replacement, expected-content hashes, and conflict failure.
+- `code.replace_exact`: Replace exactly one occurrence of text in an existing file. Zero or multiple matches are conflicts, not fuzzy-edit opportunities.
+- `code.insert_at_anchor`: Insert content before or after exactly one anchor in an existing file.
+- `code.delete_exact`: Delete exactly one occurrence of text in an existing file.
 - `code.rename`: Rename a file or directory within the workspace, failing on collisions unless the user explicitly approves replacement.
 - `code.format`: Run a named, configured formatter and return its bounded result. Formatter tasks and their workspace-relative arguments are supplied by repository configuration; the tool must not assume a language, executable, or file extension.
 
-All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch operations must support pre-apply preview and conflict validation; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
+All code and local workspace writes must produce a bounded change set or diff with affected paths and before/after state hashes at completion. Patch and structured edit operations must support pre-apply preview, exact-match validation, expected-content hashes, immediate pre-apply rechecks, and conflict failure; trusted direct filesystem and local Git mutations may execute autonomously and report applied change-set evidence for the remote human change request. A model-generated patch is data to validate, not a command to execute. Deletion and replacement are write operations with a higher approval level than an additive patch. Direct filesystem mutations and local Git mutations use the same normalized change-set result so a remote change request can review their effects uniformly.
 
 **Git inspection** is first-class and must not be implemented by asking the model to compose arbitrary Git commands:
 

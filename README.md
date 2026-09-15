@@ -379,11 +379,14 @@ Code and validation:
 
 - `code.check_patch`
 - `code.apply_patch`
+- `code.replace_exact`
+- `code.insert_at_anchor`
+- `code.delete_exact`
 - `code.rename`
 - `code.format`
 - `process.run`
 
-`code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
+For small, localized edits, prefer `code.replace_exact`, `code.insert_at_anchor`, and `code.delete_exact`. They require exactly one match, reject ambiguous anchors, support expected hashes and dry-run previews, and return change-set evidence. Use `code.apply_patch` for larger multi-file changes. `code.format` runs a formatter task configured by the workspace. Pass the configured task name and workspace-relative arguments; `doit` does not assume a language, formatter, or file extension.
 
 `process.run` accepts a configured task name, not an executable or shell command. Define repository tasks in `.doit/config.json` or another selected configuration file:
 
