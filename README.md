@@ -6,7 +6,7 @@ The project is designed for OpenAI Responses-compatible backends, including Micr
 
 ## Installation
 
-## Requirements
+## Installation Requirements
 
 Go version: 1.27
 
