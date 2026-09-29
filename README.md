@@ -6,6 +6,10 @@ The project is designed for OpenAI Responses-compatible backends, including Micr
 
 ## Installation
 
+## Installation Requirements
+
+Go version: 1.27
+
 Install the `doit` binary with:
 
 ```bash
