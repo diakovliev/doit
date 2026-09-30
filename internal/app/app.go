@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"slices"
@@ -403,20 +404,89 @@ func writeMarkdownSession(writer io.Writer, record session.Record) error {
 	if err := writeMarkdownEvents(writer, record.Events); err != nil {
 		return err
 	}
+	if err := writeMarkdownEventText(writer, record.Events); err != nil {
+		return err
+	}
 	return writeMarkdownResult(writer, record.Result)
 }
 
 func writeMarkdownEvents(writer io.Writer, events []session.Event) error {
-	if _, err := fmt.Fprintln(writer, "## Events\n\n| Sequence | Timestamp | Type | Summary |\n| ---: | --- | --- | --- |"); err != nil {
+	if _, err := fmt.Fprintf(writer, "## Events (%d)\n\n| # | Time | Type | Status | Tool calls | Text |\n| ---: | --- | --- | --- | ---: | --- |\n", len(events)); err != nil {
 		return err
 	}
 	for _, event := range events {
-		if _, err := fmt.Fprintf(writer, "| %d | %s | `%s` | %s |\n", event.Sequence, event.Timestamp.Format(time.RFC3339), markdownEscape(event.Type), markdownEscape(humanEventSummary(event))); err != nil {
+		status, toolCalls, text := markdownEventFields(event)
+		if _, err := fmt.Fprintf(writer, "| %d | %s | `%s` | %s | %s | %s |\n", event.Sequence, event.Timestamp.Format("15:04:05"), markdownEscape(event.Type), markdownTableEscape(status), markdownTableEscape(toolCalls), markdownTableEscape(text)); err != nil {
 			return err
 		}
 	}
 	_, err := fmt.Fprintln(writer)
 	return err
+}
+
+func markdownEventFields(event session.Event) (status, toolCalls, text string) {
+	switch event.Type {
+	case "request":
+		var request model.Request
+		if json.Unmarshal(event.Data, &request) == nil {
+			for index := len(request.Input) - 1; index >= 0; index-- {
+				if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
+					return "-", "-", publicSessionPreview(request.Input[index].Content)
+				}
+			}
+		}
+	case "model_message":
+		var response model.Response
+		if json.Unmarshal(event.Data, &response) == nil {
+			return response.Status, strconv.Itoa(len(response.ToolCalls)), publicSessionPreview(response.Text)
+		}
+	case "tool_result":
+		var result tools.Result
+		if json.Unmarshal(event.Data, &result) == nil {
+			return string(result.Status), "-", "-"
+		}
+	}
+	return "-", "-", "-"
+}
+
+func writeMarkdownEventText(writer io.Writer, events []session.Event) error {
+	wroteHeading := false
+	for _, event := range events {
+		text := fullMarkdownEventText(event)
+		if text == "" {
+			continue
+		}
+		if !wroteHeading {
+			if _, err := fmt.Fprint(writer, "## Full Text\n\n"); err != nil {
+				return err
+			}
+			wroteHeading = true
+		}
+		if _, err := fmt.Fprintf(writer, "<details>\n<summary>Event #%d (%s)</summary>\n\n<pre>%s</pre>\n\n</details>\n\n", event.Sequence, markdownEscape(event.Type), html.EscapeString(text)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fullMarkdownEventText(event session.Event) string {
+	switch event.Type {
+	case "request":
+		var request model.Request
+		if json.Unmarshal(event.Data, &request) == nil {
+			for index := len(request.Input) - 1; index >= 0; index-- {
+				if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
+					return request.Input[index].Content
+				}
+			}
+		}
+	case "model_message":
+		var response model.Response
+		if json.Unmarshal(event.Data, &response) == nil {
+			return response.Text
+		}
+	}
+	return ""
 }
 
 func writeMarkdownResult(writer io.Writer, result *session.Result) error {
@@ -427,22 +497,41 @@ func writeMarkdownResult(writer io.Writer, result *session.Result) error {
 		_, err := fmt.Fprintln(writer, "No result recorded.")
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "**Summary:** %s  \n**Usage:** `%s`\n\n", markdownEscape(result.Summary), markdownEscape(formatUsage(result.Usage))); err != nil {
+	if _, err := fmt.Fprintf(writer, "### Summary\n\n%s\n\n### Usage\n\n`%s`\n\n", strings.TrimSpace(result.Summary), markdownEscape(formatUsage(result.Usage))); err != nil {
 		return err
 	}
-	if len(result.ChangedPaths) > 0 {
-		if _, err := fmt.Fprintf(writer, "**Changed paths:** `%s`\n\n", markdownEscape(strings.Join(result.ChangedPaths, "`, `"))); err != nil {
+	if err := writeMarkdownChangedPaths(writer, result.ChangedPaths); err != nil {
+		return err
+	}
+	return writeMarkdownValidations(writer, result.Validations)
+}
+
+func writeMarkdownChangedPaths(writer io.Writer, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprint(writer, "### Changed Paths\n\n"); err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if _, err := fmt.Fprintf(writer, "- `%s`\n", markdownEscape(path)); err != nil {
 			return err
 		}
 	}
-	if len(result.Validations) > 0 {
-		if _, err := fmt.Fprint(writer, "| Validation | Passed | Exit code | Duration |\n| --- | ---: | ---: | --- |\n\n"); err != nil {
+	_, err := fmt.Fprintln(writer)
+	return err
+}
+
+func writeMarkdownValidations(writer io.Writer, validations []session.Validation) error {
+	if len(validations) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprint(writer, "### Validations\n\n| Validation | Passed | Exit code | Duration |\n| --- | ---: | ---: | --- |\n"); err != nil {
+		return err
+	}
+	for _, validation := range validations {
+		if _, err := fmt.Fprintf(writer, "| `%s` | %t | %d | %s |\n", markdownEscape(validation.Task), validation.Passed, validation.ExitCode, validation.Duration.Round(time.Millisecond)); err != nil {
 			return err
-		}
-		for _, validation := range result.Validations {
-			if _, err := fmt.Fprintf(writer, "| `%s` | %t | %d | %s |\n", markdownEscape(validation.Task), validation.Passed, validation.ExitCode, validation.Duration.Round(time.Millisecond)); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -451,6 +540,16 @@ func writeMarkdownResult(writer io.Writer, result *session.Result) error {
 func markdownEscape(value string) string {
 	value = strings.ReplaceAll(value, "|", "\\|")
 	value = strings.ReplaceAll(value, "\n", " ")
+	return value
+}
+
+func markdownTableEscape(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "`", "\\`")
+	value = strings.ReplaceAll(value, "*", "\\*")
 	return value
 }
 

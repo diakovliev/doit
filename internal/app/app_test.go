@@ -99,12 +99,12 @@ func TestWriteHumanSession(t *testing.T) {
 }
 
 func TestWriteMarkdownSession(t *testing.T) {
-	record := session.Record{Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Model: "test-model"}, Events: []session.Event{{Sequence: 1, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done"}`)}}, Result: &session.Result{Summary: "done", ChangedPaths: []string{"README.md"}}}
+	record := session.Record{Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Model: "test-model"}, Events: []session.Event{{Sequence: 1, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done"}`)}}, Result: &session.Result{Summary: "done\n\n- detail", ChangedPaths: []string{"README.md"}}}
 	var output bytes.Buffer
 	if err := writeMarkdownSession(&output, record); err != nil {
 		t.Fatalf("write markdown session: %v", err)
 	}
-	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| 1 |", "## Result", "**Summary:** done", "README.md"} {
+	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| # | Time | Type | Status | Tool calls | Text |", "| 1 |", "completed", "| 0 | done |", "## Full Text", "<summary>Event #1 (model_message)</summary>", "<pre>done</pre>", "## Result", "### Summary", "- detail", "### Changed Paths", "- `README.md`"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("markdown session output missing %q: %s", expected, output.String())
 		}

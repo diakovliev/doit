@@ -116,7 +116,7 @@ Implemented command paths:
 | `doit status` | Report the effective workspace, selected profiles, and Git state. |
 | `doit model test` | Send a minimal request to the selected backend and report normalized response metadata. |
 | `doit config list` | Print the effective non-secret configuration. |
-| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. |
+| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. `session inspect` shows the latest completed session by default; pass an ID to inspect a specific session. Human output is the default; use `--format md` for structured Markdown or `--format json` for machine-readable output. |
 | `doit doctor` | Run local workspace, configuration, and profile diagnostics. |
 | `doit --help` | Print CLI usage. Put `--help` before the command. |
 | `doit --version` | Print the CLI version. |
@@ -144,6 +144,7 @@ The project command creates `.doit/config.json`, `.doit/instructions.md`, instru
 | `--thinking-effort <value>` | Override the model's reasoning effort for this invocation. The value is passed through to the backend. | `doit --thinking-effort high run "Review the code"` |
 | `--format human` | Print progress and a human result. | `doit --format human run "Summarize"` |
 | `--format json` | Print one machine-readable result object. | `doit --format json run "Summarize"` |
+| `--format md` / `--format markdown` | Print structured Markdown where supported, including session inspection. | `doit --format md session inspect` |
 | `--ephemeral` | Keep the session in memory and do not persist it. | `doit --ephemeral run "Inspect only"` |
 | `--new-session` / `--no-resume` | Start a fresh durable session instead of reusing the latest one. | `doit --new-session run "Start a separate review"` |
 | `--timeout <duration>` | Set the request context deadline. | `doit --timeout 10m run "Review the repository"` |
