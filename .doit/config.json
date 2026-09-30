@@ -13,8 +13,8 @@
       "streaming": true,
       "thinking_effort": "medium",
       "token": {
-        "max_input_tokens": 64000,
-        "max_output_tokens": 64000
+        "max_input_tokens": 48000,
+        "max_output_tokens": 48000
       }
     },
     "foundry_deepseek": {
