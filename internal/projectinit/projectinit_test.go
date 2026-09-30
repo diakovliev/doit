@@ -28,6 +28,30 @@ func TestInitializeCreatesScaffold(t *testing.T) {
 	assertGeneratedFiles(t, workspace, expectedCreated[1:])
 }
 
+func TestInitializeGlobalCreatesScaffoldBelowHomeDoit(t *testing.T) {
+	home := t.TempDir()
+	result, err := InitializeGlobal(context.Background(), home)
+	if err != nil {
+		t.Fatalf("initialize global: %v", err)
+	}
+	expected := []string{"config.json", "instructions.md", "instructions/README.md", "skills/README.md", "skills/example/SKILL.md.template"}
+	if result.Workspace != filepath.Join(home, ".doit") || !slices.Equal(result.Created, expected) || len(result.Existing) != 0 {
+		t.Fatalf("unexpected global initialization result: %+v", result)
+	}
+	for _, path := range expected {
+		if _, err := os.Stat(filepath.Join(home, ".doit", path)); err != nil {
+			t.Fatalf("stat global scaffold %s: %v", path, err)
+		}
+	}
+	second, err := InitializeGlobal(context.Background(), home)
+	if err != nil {
+		t.Fatalf("repeat global initialization: %v", err)
+	}
+	if len(second.Created) != 0 || len(second.Existing) != len(expected) {
+		t.Fatalf("unexpected repeat result: %+v", second)
+	}
+}
+
 func TestInitializePreservesExistingFiles(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := filepath.Join(workspace, ".doit", "config.json")

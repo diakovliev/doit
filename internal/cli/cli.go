@@ -26,6 +26,7 @@ type Invocation struct {
 	Timeout        time.Duration
 	Ephemeral      bool
 	NewSession     bool
+	GlobalInit     bool
 	NoColor        bool
 	Quiet          bool
 	Verbose        bool
@@ -50,6 +51,7 @@ var booleanOptionHandlers = map[string]func(*Invocation){
 	"--version":     func(invocation *Invocation) { invocation.Command = "version" },
 	"--ephemeral":   func(invocation *Invocation) { invocation.Ephemeral = true },
 	"--new-session": func(invocation *Invocation) { invocation.NewSession = true },
+	"--global":      func(invocation *Invocation) { invocation.GlobalInit = true },
 	"--no-resume":   func(invocation *Invocation) { invocation.NewSession = true },
 	"--no-color":    func(invocation *Invocation) { invocation.NoColor = true },
 	"--quiet":       func(invocation *Invocation) { invocation.Quiet = true },
@@ -171,21 +173,39 @@ func validateCommand(invocation *Invocation) error {
 			return usageError("agent does not accept positional arguments")
 		}
 	case "run", "develop", "review":
-		if len(invocation.Arguments) > 0 {
-			invocation.Request = strings.Join(invocation.Arguments, " ")
-		}
+		setRequest(invocation)
 	case "init":
-		if len(invocation.Arguments) > 0 {
-			return usageError("init does not accept arguments")
-		}
+		return validateInit(invocation)
 	case "help", "version":
-		if len(invocation.Arguments) > 0 {
-			return usageError(invocation.Command + " does not accept arguments")
-		}
+		return validateNoArguments(invocation)
 	case "test", "status", "model", "config", "session", "doctor":
 		// These commands are reserved by the design and will be wired by later tasks.
 	default:
 		return usageError("unknown command: " + invocation.Command)
+	}
+	return nil
+}
+
+func setRequest(invocation *Invocation) {
+	if len(invocation.Arguments) > 0 {
+		invocation.Request = strings.Join(invocation.Arguments, " ")
+	}
+}
+
+func validateInit(invocation *Invocation) error {
+	if len(invocation.Arguments) == 1 && invocation.Arguments[0] == "--global" {
+		invocation.GlobalInit = true
+		return nil
+	}
+	if len(invocation.Arguments) > 0 {
+		return usageError("init does not accept arguments")
+	}
+	return nil
+}
+
+func validateNoArguments(invocation *Invocation) error {
+	if len(invocation.Arguments) > 0 {
+		return usageError(invocation.Command + " does not accept arguments")
 	}
 	return nil
 }
@@ -217,32 +237,54 @@ func parseGlobalOption(invocation *Invocation, args []string) (int, error) {
 }
 
 func setOptionValue(invocation *Invocation, name, value string) error {
-	switch name {
-	case "-C", "--directory":
-		invocation.Directory = value
-	case "-p", "--profile":
-		invocation.Profile = value
-	case "-m", "--model":
-		invocation.Model = value
-	case "--thinking-effort":
-		if strings.TrimSpace(value) == "" {
-			return usageError("thinking effort must not be empty")
-		}
-		invocation.ThinkingEffort = value
-	case "--format":
-		if value != "human" && value != "json" {
-			return usageError("format must be human or json")
-		}
-		invocation.Format = value
-	case "--timeout":
-		timeout, err := time.ParseDuration(value)
-		if err != nil || timeout <= 0 {
-			return usageError("timeout must be a positive duration")
-		}
-		invocation.Timeout = timeout
-	default:
+	setter, ok := optionValueSetters[name]
+	if !ok {
 		return usageError("unsupported option: " + name)
 	}
+	return setter(invocation, value)
+}
+
+var optionValueSetters = map[string]func(*Invocation, string) error{
+	"-C":                setDirectory,
+	"--directory":       setDirectory,
+	"-p":                setProfile,
+	"--profile":         setProfile,
+	"-m":                setModel,
+	"--model":           setModel,
+	"--thinking-effort": setThinkingEffort,
+	"--format":          setFormat,
+	"--timeout":         setTimeout,
+}
+
+func setDirectory(invocation *Invocation, value string) error {
+	invocation.Directory = value
+	return nil
+}
+func setProfile(invocation *Invocation, value string) error { invocation.Profile = value; return nil }
+func setModel(invocation *Invocation, value string) error   { invocation.Model = value; return nil }
+
+func setThinkingEffort(invocation *Invocation, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return usageError("thinking effort must not be empty")
+	}
+	invocation.ThinkingEffort = value
+	return nil
+}
+
+func setFormat(invocation *Invocation, value string) error {
+	if value != "human" && value != "json" {
+		return usageError("format must be human or json")
+	}
+	invocation.Format = value
+	return nil
+}
+
+func setTimeout(invocation *Invocation, value string) error {
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return usageError("timeout must be a positive duration")
+	}
+	invocation.Timeout = timeout
 	return nil
 }
 
@@ -277,7 +319,7 @@ func writeHelp(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: doit [global options] <command> [command options] [arguments]")
 	_, _ = fmt.Fprintln(writer, "")
 	_, _ = fmt.Fprintln(writer, "Commands: init, agent, run, develop, review, test, status, model, config, session, doctor, version")
-	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --thinking-effort; --format; --ephemeral; --new-session; --timeout")
+	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --thinking-effort; --global; --format; --ephemeral; --new-session; --timeout")
 }
 
 type unavailableHandler struct{}

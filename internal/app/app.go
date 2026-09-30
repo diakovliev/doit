@@ -75,13 +75,15 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 		return err
 	}
 	defer dependencies.close()
+	budget := configuration.EffectiveTokenBudget(dependencies.profile)
+	contextPolicy := configuration.EffectiveContextPolicy(dependencies.profile)
 	if invocation.Command == "agent" && configuration.Format != "json" {
 		dependencies.runner.Approve = func(approvalContext context.Context, action policy.Action, call tools.Call) (bool, error) {
 			progressLine.Clear()
 			return promptApproval(approvalContext, input, stdout, action, call)
 		}
 	}
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, ThinkingEffort: dependencies.profile.ThinkingEffort, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, ThinkingEffort: dependencies.profile.ThinkingEffort, ContextPolicy: contextPolicyForAgent(contextPolicy), MaxInputTokens: budget.MaxInputTokens, MaxOutputTokens: budget.MaxOutputTokens, MaxSessionTokens: budget.MaxSessionTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
 	if err != nil {
 		return err
 	}
@@ -411,7 +413,9 @@ func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Read
 		return err
 	}
 	defer dependencies.close()
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: "run", Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: true, WorkspaceAutomation: true, SessionID: invocation.Arguments[0]})
+	budget := configuration.EffectiveTokenBudget(dependencies.profile)
+	contextPolicy := configuration.EffectiveContextPolicy(dependencies.profile)
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: "run", Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, ThinkingEffort: dependencies.profile.ThinkingEffort, ContextPolicy: contextPolicyForAgent(contextPolicy), MaxInputTokens: budget.MaxInputTokens, MaxOutputTokens: budget.MaxOutputTokens, MaxSessionTokens: budget.MaxSessionTokens, NonInteractive: true, WorkspaceAutomation: true, SessionID: invocation.Arguments[0]})
 	if err != nil {
 		return err
 	}
@@ -450,7 +454,13 @@ func sortedKeys(values map[string]config.BackendProfile) []string {
 }
 
 func initializeProject(ctx context.Context, invocation cli.Invocation, stdout io.Writer) error {
-	result, err := projectinit.Initialize(ctx, invocation.Directory)
+	var result projectinit.Result
+	var err error
+	if invocation.GlobalInit {
+		result, err = projectinit.InitializeGlobal(ctx, "")
+	} else {
+		result, err = projectinit.Initialize(ctx, invocation.Directory)
+	}
 	if err != nil {
 		return err
 	}
@@ -508,7 +518,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
-	toolset, err := buildRuntimeTools(configuration, filesystem, processService, gitService, sessionStore)
+	toolset, err := buildRuntimeTools(configuration, profile, filesystem, processService, gitService, sessionStore)
 	if err != nil {
 		_ = sessionStore.Close()
 		return runtimeDependencies{}, err
@@ -535,7 +545,11 @@ func executionDuration(milliseconds int) time.Duration {
 	return time.Duration(milliseconds) * time.Millisecond
 }
 
-func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service, sessionStore session.Store) (runtimeTools, error) {
+func contextPolicyForAgent(contextPolicy config.EffectiveContextPolicy) *contextdata.Policy {
+	return &contextdata.Policy{IncludeGuidance: contextPolicy.IncludeGuidance, IncludeGitStatus: contextPolicy.IncludeGitStatus, IncludeWorkspaceListing: contextPolicy.IncludeWorkspaceListing}
+}
+
+func buildRuntimeTools(configuration config.Config, profile config.BackendProfile, filesystem *workspacefs.Service, processService *processrunner.Runner, gitService *gitinspect.Service, sessionStore session.Store) (runtimeTools, error) {
 	registry, err := buildRegistryWithGit(configuration.Workspace, filesystem, processService, gitService, "full")
 	if err != nil {
 		return runtimeTools{}, err
@@ -548,7 +562,7 @@ func buildRuntimeTools(configuration config.Config, filesystem *workspacefs.Serv
 		_ = mcpRuntime.Close()
 		return runtimeTools{}, err
 	}
-	registry, err = registry.Select(configuration.ToolProfile)
+	registry, err = registry.Select(configuration.EffectiveToolProfile(profile))
 	if err != nil {
 		_ = mcpRuntime.Close()
 		return runtimeTools{}, err

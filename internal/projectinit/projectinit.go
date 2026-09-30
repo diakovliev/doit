@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/diakovliev/doit/internal/apperr"
 )
@@ -115,8 +116,45 @@ func Initialize(ctx context.Context, workspace string) (Result, error) {
 	}
 	defer func() { _ = root.Close() }()
 
-	result := Result{Workspace: absoluteWorkspace}
+	return initializeRoot(ctx, root, absoluteWorkspace, templates)
+}
+
+// InitializeGlobal creates the global .doit scaffold below the user's home directory.
+// Existing files are preserved so initialization is safe to repeat.
+func InitializeGlobal(ctx context.Context, home string) (Result, error) {
+	if err := contextError(ctx); err != nil {
+		return Result{}, err
+	}
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return Result{}, apperr.Wrap(apperr.KindConfig, "projectinit.global", err)
+		}
+	}
+	absoluteHome, err := filepath.Abs(home)
+	if err != nil {
+		return Result{}, apperr.Wrap(apperr.KindConfig, "projectinit.global", err)
+	}
+	globalRoot := filepath.Join(absoluteHome, ".doit")
+	if err := os.MkdirAll(globalRoot, 0700); err != nil {
+		return Result{}, apperr.Wrap(apperr.KindConfig, "projectinit.global", err)
+	}
+	root, err := os.OpenRoot(globalRoot)
+	if err != nil {
+		return Result{}, apperr.Wrap(apperr.KindConfig, "projectinit.global", err)
+	}
+	defer func() { _ = root.Close() }()
+	globalTemplates := make([]template, 0, len(templates))
 	for _, fileTemplate := range templates {
+		globalTemplates = append(globalTemplates, template{path: strings.TrimPrefix(fileTemplate.path, ".doit/"), content: fileTemplate.content})
+	}
+	return initializeRoot(ctx, root, globalRoot, globalTemplates)
+}
+
+func initializeRoot(ctx context.Context, root *os.Root, location string, fileTemplates []template) (Result, error) {
+	result := Result{Workspace: location}
+	for _, fileTemplate := range fileTemplates {
 		if err := contextError(ctx); err != nil {
 			return result, err
 		}

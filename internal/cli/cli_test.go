@@ -45,6 +45,18 @@ func TestParseNoResumeAliasStartsFreshSession(t *testing.T) {
 	}
 }
 
+func TestParseGlobalInit(t *testing.T) {
+	for _, args := range [][]string{{"init", "--global"}, {"--global", "init"}} {
+		invocation, err := Parse(args)
+		if err != nil {
+			t.Fatalf("parse global init %v: %v", args, err)
+		}
+		if !invocation.GlobalInit || invocation.Command != "init" {
+			t.Fatalf("unexpected global init invocation: %+v", invocation)
+		}
+	}
+}
+
 func TestParseDevelopCarriesRequest(t *testing.T) {
 	invocation, err := Parse([]string{"develop", "add", "coverage"})
 	if err != nil {

@@ -46,6 +46,56 @@ func TestLoadUsesConfiguredPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadMergesProjectProfileOverGlobalProfile(t *testing.T) {
+	workspace := t.TempDir()
+	projectFile := filepath.Join(workspace, "project.json")
+	userFile := filepath.Join(workspace, "user.json")
+	writeConfigFile(t, userFile, `{"token":{"max_input_tokens":16000,"max_output_tokens":4000,"max_session_tokens":64000},"profiles":{"shared":{"api_root":"https://global.example/v1","model":"global-model","api_key_env":"GLOBAL_KEY","tool_profile":"inspect","token":{"max_input_tokens":8000,"max_session_tokens":16000},"context":{"include_git_status":true,"include_workspace_listing":true},"request_parameters":{"reasoning":{"effort":"low"}}}}}`)
+	writeConfigFile(t, projectFile, `{"profiles":{"shared":{"model":"project-model","token":{"max_input_tokens":12000},"context":{"include_guidance":false,"include_workspace_listing":false},"tool_profile":"small-edit","request_parameters":{"reasoning":{"effort":"high"}}}}}`)
+	configuration, err := Load(LoadOptions{Workspace: workspace, ProjectFile: projectFile, UserFile: userFile})
+	if err != nil {
+		t.Fatalf("load merged config: %v", err)
+	}
+	profile := configuration.Profiles["shared"]
+	assertMergedProfile(t, configuration, profile)
+}
+
+func assertMergedProfile(t *testing.T, configuration Config, profile BackendProfile) {
+	t.Helper()
+	assertMergedProfileFields(t, profile)
+	assertMergedProfileBudget(t, configuration, profile)
+	assertMergedProfileContext(t, configuration, profile)
+	if configuration.EffectiveToolProfile(profile) != "small-edit" {
+		t.Fatalf("unexpected effective tool profile: %q", configuration.EffectiveToolProfile(profile))
+	}
+}
+
+func assertMergedProfileFields(t *testing.T, profile BackendProfile) {
+	t.Helper()
+	if profile.APIRoot != "https://global.example/v1" || profile.Model != "project-model" || profile.APIKeyEnv != "GLOBAL_KEY" {
+		t.Fatalf("project profile did not preserve global fields: %+v", profile)
+	}
+	if string(profile.RequestParameters["reasoning"]) != `{"effort":"high"}` {
+		t.Fatalf("project profile did not override request parameters: %+v", profile.RequestParameters)
+	}
+}
+
+func assertMergedProfileBudget(t *testing.T, configuration Config, profile BackendProfile) {
+	t.Helper()
+	budget := configuration.EffectiveTokenBudget(profile)
+	if budget.MaxInputTokens != 12000 || budget.MaxOutputTokens != 4000 || budget.MaxSessionTokens != 16000 {
+		t.Fatalf("unexpected effective profile budget: %+v", budget)
+	}
+}
+
+func assertMergedProfileContext(t *testing.T, configuration Config, profile BackendProfile) {
+	t.Helper()
+	contextPolicy := configuration.EffectiveContextPolicy(profile)
+	if contextPolicy.IncludeGuidance || !contextPolicy.IncludeGitStatus || contextPolicy.IncludeWorkspaceListing {
+		t.Fatalf("unexpected effective context policy: %+v", contextPolicy)
+	}
+}
+
 func assertPrecedenceConfig(t *testing.T, configuration Config) {
 	t.Helper()
 	if configuration.Profile != "project" || configuration.Format != "json" || !configuration.Ephemeral {

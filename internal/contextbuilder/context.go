@@ -5,6 +5,8 @@ import (
 	stdcontext "context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/diakovliev/doit/internal/model"
@@ -20,9 +22,10 @@ const toolWorkflowGuidance = "Tool workflow: inspect before changing files; use 
 
 // Builder selects local repository context for model requests.
 type Builder struct {
-	filesystem *workspacefs.Service
-	counter    usage.TokenCounter
-	gitStatus  GitStatusProvider
+	filesystem         *workspacefs.Service
+	counter            usage.TokenCounter
+	gitStatus          GitStatusProvider
+	globalGuidanceRoot string
 }
 
 // GitStatusProvider returns a fresh, bounded repository status summary.
@@ -33,7 +36,19 @@ func New(filesystem *workspacefs.Service, counter usage.TokenCounter) *Builder {
 	if counter == nil {
 		counter = usage.ByteEstimator{}
 	}
-	return &Builder{filesystem: filesystem, counter: counter}
+	globalRoot := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		globalRoot = filepath.Join(home, ".doit")
+	}
+	return &Builder{filesystem: filesystem, counter: counter, globalGuidanceRoot: globalRoot}
+}
+
+// WithGlobalGuidanceRoot overrides the home .doit guidance root, primarily for embedding callers and tests.
+func (builder *Builder) WithGlobalGuidanceRoot(root string) *Builder {
+	if builder != nil {
+		builder.globalGuidanceRoot = root
+	}
+	return builder
 }
 
 // WithGitStatus adds fresh repository status to each newly built context.
@@ -48,6 +63,7 @@ func (builder *Builder) WithGitStatus(provider GitStatusProvider) *Builder {
 type Request struct {
 	Model           string
 	ThinkingEffort  string
+	Policy          *Policy
 	UserInput       string
 	Instructions    string
 	History         []model.InputItem
@@ -55,6 +71,13 @@ type Request struct {
 	Tools           []model.ToolDefinition
 	MaxInputTokens  int
 	MaxOutputTokens int
+}
+
+// Policy controls which repository material is included automatically.
+type Policy struct {
+	IncludeGuidance         bool
+	IncludeGitStatus        bool
+	IncludeWorkspaceListing bool
 }
 
 // Build returns a token-bounded normalized model request and its input usage.
@@ -66,11 +89,17 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, errors.New("context request is empty")
 	}
 	input := append([]model.InputItem(nil), request.History...)
+	policy := request.Policy
+	if policy == nil {
+		policy = &Policy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
+	}
 	historyCount := len(input)
 	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput})
-	input = builder.appendGitStatus(ctx, input)
-	input = builder.appendSelectedContext(ctx, input, request.Paths)
-	instructions := builder.buildInstructions(ctx, request.Instructions, request.Tools)
+	if policy.IncludeGitStatus {
+		input = builder.appendGitStatus(ctx, input)
+	}
+	input = builder.appendSelectedContext(ctx, input, request.Paths, policy.IncludeWorkspaceListing)
+	instructions := builder.buildInstructions(ctx, request.Instructions, request.Tools, policy.IncludeGuidance)
 	normalized := model.Request{Model: request.Model, ThinkingEffort: request.ThinkingEffort, Instructions: strings.TrimSpace(instructions), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
 	budget := request.MaxInputTokens
 	if budget <= 0 {
@@ -83,8 +112,10 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	return normalized, counts, nil
 }
 
-func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions string, definitions []model.ToolDefinition) string {
-	instructions += "\n" + builder.projectInstructions(ctx)
+func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions string, definitions []model.ToolDefinition, includeGuidance bool) string {
+	if includeGuidance {
+		instructions += "\n" + builder.projectInstructions(ctx)
+	}
 	if hasToolWorkflow(definitions) {
 		instructions += "\n\n" + toolWorkflowGuidance
 	}
@@ -94,14 +125,14 @@ func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions s
 	return strings.TrimSpace(instructions)
 }
 
-func (builder *Builder) appendSelectedContext(ctx stdcontext.Context, input []model.InputItem, paths []string) []model.InputItem {
+func (builder *Builder) appendSelectedContext(ctx stdcontext.Context, input []model.InputItem, paths []string, includeWorkspaceListing bool) []model.InputItem {
 	for _, path := range paths {
 		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
 		if err == nil {
 			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "File: " + readResponse.Path + "\n" + readResponse.Content})
 		}
 	}
-	if len(paths) == 0 {
+	if len(paths) == 0 && includeWorkspaceListing {
 		if listing, err := builder.filesystem.List(ctx, workspacefs.ListRequest{MaxEntries: 100}); err == nil {
 			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "Workspace entries:\n" + formatEntries(listing)})
 		}
@@ -268,7 +299,7 @@ func (builder *Builder) projectInstructions(ctx stdcontext.Context) string {
 	if err := ctx.Err(); err != nil {
 		return ""
 	}
-	return loadRepositoryGuidance(ctx, builder.filesystem.Root())
+	return loadRepositoryGuidance(ctx, builder.filesystem.Root(), builder.globalGuidanceRoot)
 }
 
 func formatEntries(listing workspacefs.ListResponse) string {

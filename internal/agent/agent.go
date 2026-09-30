@@ -51,6 +51,7 @@ type Task struct {
 	Model                  string
 	ThinkingEffort         string
 	ThinkingEffortForRound func(int) string
+	ContextPolicy          *contextdata.Policy
 	MaxInputTokens         int
 	MaxOutputTokens        int
 	MaxSessionTokens       int
@@ -298,7 +299,7 @@ func (runner *Runner) buildRequest(ctx context.Context, task Task, previous *ses
 		modelTools = append(modelTools, model.ToolDefinition{Type: "function", Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters})
 	}
 	modelTools = append(modelTools, thinkingEffortToolDefinition())
-	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, ThinkingEffort: task.ThinkingEffort, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, ThinkingEffort: task.ThinkingEffort, Policy: task.ContextPolicy, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
 }
 
 func thinkingEffortToolDefinition() model.ToolDefinition {
@@ -453,6 +454,10 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 	if !exists {
 		return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
 	}
+	return runner.handleRegisteredToolCall(ctx, sessionID, request, call, tool, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation)
+}
+
+func (runner *Runner) handleRegisteredToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, tool tools.Tool, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
 	decision, err := runner.toolDecision(ctx, tool.Definition(), call, nonInteractive, workspaceAutomation)
 	if err != nil {
@@ -460,21 +465,34 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 	}
 	toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
 	if decision == policy.DecisionAllow {
-		toolContext := session.WithActiveID(ctx, sessionID)
-		toolResult = tool.Execute(toolContext, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
-		if toolResult.ChangeSet != nil {
-			toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
-		}
-		*changedPaths = appendUniquePaths(*changedPaths, toolResult.ChangedPaths)
-		if toolResult.ChangeSet != nil {
-			*changeSets = appendUniqueChangeSets(*changeSets, *toolResult.ChangeSet)
-		}
-		if call.Name == "process.run" {
-			if validation, ok := validationFromResult(toolResult.Data); ok {
-				*validations = append(*validations, validation)
-			}
+		toolResult = runner.executeRegisteredTool(ctx, sessionID, call, tool, workspaceAutomation, nonInteractive)
+		runner.recordToolEvidence(call.Name, toolResult, changedPaths, changeSets, validations)
+	}
+	return runner.appendToolResult(ctx, sessionID, request, call, toolResult)
+}
+
+func (runner *Runner) executeRegisteredTool(ctx context.Context, sessionID session.ID, call model.ToolCall, tool tools.Tool, workspaceAutomation, nonInteractive bool) tools.Result {
+	toolContext := session.WithActiveID(ctx, sessionID)
+	toolResult := tool.Execute(toolContext, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+	if toolResult.ChangeSet != nil {
+		toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
+	}
+	return toolResult
+}
+
+func (runner *Runner) recordToolEvidence(name string, result tools.Result, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation) {
+	*changedPaths = appendUniquePaths(*changedPaths, result.ChangedPaths)
+	if result.ChangeSet != nil {
+		*changeSets = appendUniqueChangeSets(*changeSets, *result.ChangeSet)
+	}
+	if name == "process.run" {
+		if validation, ok := validationFromResult(result.Data); ok {
+			*validations = append(*validations, validation)
 		}
 	}
+}
+
+func (runner *Runner) appendToolResult(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, toolResult tools.Result) error {
 	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 		return err
 	}

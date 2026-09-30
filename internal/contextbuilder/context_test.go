@@ -38,6 +38,82 @@ func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 	assertGuidance(t, request.Instructions)
 }
 
+func TestBuilderLoadsGlobalGuidanceAndProjectOverridesAfterIt(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(t.TempDir(), ".doit")
+	writeGlobalGuidanceFixture(t, global)
+	writeProjectGuidanceFixture(t, root)
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGlobalGuidanceRoot(global)
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{Model: "test-model", UserInput: "continue", MaxInputTokens: 1000})
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	assertGuidanceOrder(t, request.Instructions)
+}
+
+func TestBuilderContextPolicyLimitsAutomaticMaterial(t *testing.T) {
+	root := t.TempDir()
+	writeGuidanceFixture(t, root)
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(func(stdcontext.Context) (string, error) {
+		return " M README.md", nil
+	})
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{
+		Model:          "test-model",
+		UserInput:      "inspect README",
+		Paths:          []string{"README.md"},
+		Policy:         &contextdata.Policy{IncludeGuidance: false, IncludeGitStatus: false, IncludeWorkspaceListing: false},
+		MaxInputTokens: 1000,
+	})
+	if err != nil {
+		t.Fatalf("build restricted context: %v", err)
+	}
+	if len(request.Input) != 2 || strings.Contains(request.Instructions, "Follow repository rules.") || strings.Contains(request.Input[1].Content, "Current Git status") {
+		t.Fatalf("automatic context policy was not applied: %+v instructions=%s", request.Input, request.Instructions)
+	}
+	if !strings.Contains(request.Input[1].Content, "repository contents") {
+		t.Fatalf("explicit file context was unexpectedly removed: %+v", request.Input)
+	}
+}
+
+func writeGlobalGuidanceFixture(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "skills", "shared"), 0700); err != nil {
+		t.Fatalf("make global guidance directory: %v", err)
+	}
+	writeContextFile(t, filepath.Join(root, "instructions.md"), "Global instructions.")
+	writeContextFile(t, filepath.Join(root, "skills", "shared", "SKILL.md"), "Global skill.")
+}
+
+func writeProjectGuidanceFixture(t *testing.T, root string) {
+	t.Helper()
+	projectRoot := filepath.Join(root, ".doit")
+	if err := os.MkdirAll(filepath.Join(projectRoot, "skills", "shared"), 0700); err != nil {
+		t.Fatalf("make project guidance directory: %v", err)
+	}
+	writeContextFile(t, filepath.Join(projectRoot, "instructions.md"), "Project instructions.")
+	writeContextFile(t, filepath.Join(projectRoot, "skills", "shared", "SKILL.md"), "Project skill.")
+}
+
+func assertGuidanceOrder(t *testing.T, instructions string) {
+	t.Helper()
+	for _, expected := range []string{"Global instructions.", "Project instructions.", "Global skill.", "Project skill."} {
+		if !strings.Contains(instructions, expected) {
+			t.Fatalf("global/project guidance missing %q: %s", expected, instructions)
+		}
+	}
+	if strings.Index(instructions, "Global instructions.") > strings.Index(instructions, "Project instructions.") || strings.Index(instructions, "Global skill.") > strings.Index(instructions, "Project skill.") {
+		t.Fatalf("project guidance did not follow global guidance: %s", instructions)
+	}
+}
+
 func writeGuidanceFixture(t *testing.T, root string) {
 	t.Helper()
 	for _, directory := range []string{".github", ".github/instructions", ".github/skills/review", ".doit/instructions", ".doit/skills/testing"} {
