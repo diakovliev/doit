@@ -160,6 +160,23 @@ func TestRunnerChangesThinkingEffortBetweenRounds(t *testing.T) {
 	}
 }
 
+func TestRunnerAppliesModelRequestedThinkingEffortForNextRound(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	client := &sequenceClient{responses: []model.Response{
+		{ID: "effort", Status: "in_progress", ToolCalls: []model.ToolCall{{CallID: "effort-call", Name: thinkingEffortToolName, Arguments: `{"effort":"high","reason":"synthesize the next step"}`}}},
+		{ID: "done", Status: "completed", Text: "finished"},
+	}}
+	runner.Client = client
+	if _, err := runner.Run(context.Background(), Task{Command: "run", Request: "inspect", Workspace: root, Model: "test-model", ThinkingEffort: "low"}); err != nil {
+		t.Fatalf("run adaptive effort task: %v", err)
+	}
+	if len(client.requests) != 2 || client.requests[0].ThinkingEffort != "low" || client.requests[1].ThinkingEffort != "high" {
+		t.Fatalf("unexpected adaptive thinking effort: %+v", client.requests)
+	}
+}
+
 func TestRunnerAutomaticallyResumesLatestWorkspaceSession(t *testing.T) {
 	root := t.TempDir()
 	runner, store := newAgentTestRunnerWithEphemeral(t, root, false)

@@ -209,6 +209,8 @@ These values are merged into every provider request. Core fields such as `model`
 
 `thinking_effort` is a convenience setting for the provider's `reasoning.effort` value. The `--thinking-effort` option takes precedence over the profile setting. For embedding callers, `agent.Task.ThinkingEffortForRound` can return a different value before each model/tool round, allowing effort to change during an active task without restarting the session. A request-level value overrides the configured reasoning effort while preserving other configured reasoning fields.
 
+The model can also request a temporary effort change with the read-only `agent.set_thinking_effort` tool. It accepts `low`, `medium`, or `high` and applies the selection to the next model round only; the configured baseline is restored afterward. Use `low` for routine steps and escalate only when the next step requires substantial synthesis or careful planning. Invalid effort values are rejected and cannot change the request.
+
 An authenticated Microsoft Foundry profile can look like this:
 
 ```json

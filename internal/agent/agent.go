@@ -24,6 +24,8 @@ const defaultMaxRounds = 128
 
 const maxVerbosePublicText = 240
 
+const thinkingEffortToolName = "agent.set_thinking_effort"
+
 // ApprovalFunc handles confirmation-required tool actions.
 type ApprovalFunc func(context.Context, policy.Action, tools.Call) (bool, error)
 
@@ -134,6 +136,7 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 }
 
 func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool, thinkingEffortForRound func(int) string) (Outcome, error) {
+	defaultThinkingEffort := request.ThinkingEffort
 	totalUsage := initialUsage
 	changedPaths := make([]string, 0)
 	changeSets := make([]tools.ChangeSet, 0)
@@ -144,7 +147,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 		maxRounds = defaultMaxRounds
 	}
 	for round := range maxRounds {
-		response, requestErr := runner.requestRound(ctx, &request, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round, thinkingEffortForRound)
+		response, requestErr := runner.requestRound(ctx, &request, defaultThinkingEffort, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round, thinkingEffortForRound)
 		if requestErr != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSessionWithUsage(ctx, sessionID, requestErr, totalUsage)
 		}
@@ -164,7 +167,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 }
 
-func (runner *Runner) requestRound(ctx context.Context, request *model.Request, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int, thinkingEffortForRound func(int) string) (model.Response, error) {
+func (runner *Runner) requestRound(ctx context.Context, request *model.Request, defaultThinkingEffort string, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int, thinkingEffortForRound func(int) string) (model.Response, error) {
 	if thinkingEffortForRound != nil {
 		if effort := thinkingEffortForRound(round); effort != "" {
 			request.ThinkingEffort = effort
@@ -182,7 +185,9 @@ func (runner *Runner) requestRound(ctx context.Context, request *model.Request, 
 		message = "thinking after tool results"
 	}
 	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("%s (round %d)", message, round+1), Round: round + 1})
-	return runner.createResponse(ctx, *request)
+	response, err := runner.createResponse(ctx, *request)
+	request.ThinkingEffort = defaultThinkingEffort
+	return response, err
 }
 
 func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
@@ -292,7 +297,17 @@ func (runner *Runner) buildRequest(ctx context.Context, task Task, previous *ses
 	for _, definition := range definitions {
 		modelTools = append(modelTools, model.ToolDefinition{Type: "function", Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters})
 	}
+	modelTools = append(modelTools, thinkingEffortToolDefinition())
 	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, ThinkingEffort: task.ThinkingEffort, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+}
+
+func thinkingEffortToolDefinition() model.ToolDefinition {
+	return model.ToolDefinition{
+		Type:        "function",
+		Name:        thinkingEffortToolName,
+		Description: "Set the reasoning effort for the next model round only. Use low for routine steps; request medium or high only when the next step requires substantial synthesis or careful planning.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"effort":{"type":"string","enum":["low","medium","high"]},"reason":{"type":"string","maxLength":240}},"required":["effort"],"additionalProperties":false}`),
+	}
 }
 
 func resumeHistory(record *session.Record) []model.InputItem {
@@ -431,6 +446,9 @@ func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID,
 }
 
 func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+	if call.Name == thinkingEffortToolName {
+		return runner.handleThinkingEffortCall(ctx, sessionID, request, call)
+	}
 	tool, exists := runner.Tools.Lookup(call.Name)
 	if !exists {
 		return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
@@ -470,6 +488,42 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult)},
 	)
 	return nil
+}
+
+func (runner *Runner) handleThinkingEffortCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall) error {
+	var arguments struct {
+		Effort string `json:"effort"`
+		Reason string `json:"reason,omitempty"`
+	}
+	toolResult := tools.Result{Status: tools.StatusSucceeded, Data: map[string]string{"applies": "next model round"}}
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil || !validThinkingEffort(arguments.Effort) {
+		toolResult = tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Code: "invalid_arguments", Message: "effort must be one of: low, medium, high", NextAction: "retry with a supported effort value"}}}
+	} else {
+		request.ThinkingEffort = arguments.Effort
+		toolResult.Data = map[string]string{"effort": arguments.Effort, "applies": "next model round"}
+	}
+	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
+		return err
+	}
+	runner.emit(ProgressEvent{Phase: "tool", Message: "thinking effort request " + string(toolResult.Status), Tool: call.Name})
+	encodedResult, err := json.Marshal(toolResult)
+	if err != nil {
+		return err
+	}
+	request.Input = append(request.Input,
+		model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments},
+		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult)},
+	)
+	return nil
+}
+
+func validThinkingEffort(effort string) bool {
+	switch effort {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func approvalIdentity(workspaceAutomation, nonInteractive bool) string {
