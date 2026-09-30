@@ -207,7 +207,7 @@ func applyConfigFiles(result *Config, options LoadOptions, workspace string) err
 	if userFile == "" {
 		userFile = defaultUserConfigFile()
 	}
-	for _, filePath := range []string{projectFile, userFile} {
+	for _, filePath := range []string{userFile, projectFile} {
 		loaded, err := readFileConfig(filePath)
 		if err != nil {
 			return err

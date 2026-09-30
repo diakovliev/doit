@@ -1,5 +1,5 @@
 {
-  "default_profile": "foundry_gpt",
+  "default_profile": "ollama",
   "profiles": {
     "lmstudio": {
       "api_root": "http://localhost:1234/v1",
@@ -7,7 +7,8 @@
     },
     "ollama": {
       "api_root": "http://127.0.0.1:11434/v1",
-      "model": "phi4-mini:latest"
+      "model": "gemma4:31b-mlx",
+      "streaming": true
     },
     "foundry_deepseek": {
       "api_root": "https://daemondeveloperfoundry.services.ai.azure.com/openai/v1",
