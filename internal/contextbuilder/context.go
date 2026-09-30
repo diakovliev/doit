@@ -47,6 +47,7 @@ func (builder *Builder) WithGitStatus(provider GitStatusProvider) *Builder {
 // Request describes context to include in a model request.
 type Request struct {
 	Model           string
+	ThinkingEffort  string
 	UserInput       string
 	Instructions    string
 	History         []model.InputItem
@@ -70,7 +71,7 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	input = builder.appendGitStatus(ctx, input)
 	input = builder.appendSelectedContext(ctx, input, request.Paths)
 	instructions := builder.buildInstructions(ctx, request.Instructions, request.Tools)
-	normalized := model.Request{Model: request.Model, Instructions: strings.TrimSpace(instructions), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
+	normalized := model.Request{Model: request.Model, ThinkingEffort: request.ThinkingEffort, Instructions: strings.TrimSpace(instructions), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
 	budget := request.MaxInputTokens
 	if budget <= 0 {
 		budget = defaultInputTokenBudget

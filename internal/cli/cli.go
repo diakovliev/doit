@@ -15,19 +15,20 @@ const defaultVersion = "dev"
 
 // Invocation is the parsed command and its global options.
 type Invocation struct {
-	Command    string
-	Arguments  []string
-	Request    string
-	Directory  string
-	Profile    string
-	Model      string
-	Format     string
-	Timeout    time.Duration
-	Ephemeral  bool
-	NewSession bool
-	NoColor    bool
-	Quiet      bool
-	Verbose    bool
+	Command        string
+	Arguments      []string
+	Request        string
+	Directory      string
+	Profile        string
+	Model          string
+	ThinkingEffort string
+	Format         string
+	Timeout        time.Duration
+	Ephemeral      bool
+	NewSession     bool
+	NoColor        bool
+	Quiet          bool
+	Verbose        bool
 }
 
 // Handler executes parsed commands. The foundation leaves model execution
@@ -56,14 +57,15 @@ var booleanOptionHandlers = map[string]func(*Invocation){
 }
 
 var valueOptionNames = map[string]struct{}{
-	"-C":          {},
-	"--directory": {},
-	"-p":          {},
-	"--profile":   {},
-	"-m":          {},
-	"--model":     {},
-	"--format":    {},
-	"--timeout":   {},
+	"-C":                {},
+	"--directory":       {},
+	"-p":                {},
+	"--profile":         {},
+	"-m":                {},
+	"--model":           {},
+	"--thinking-effort": {},
+	"--format":          {},
+	"--timeout":         {},
 }
 
 // Run executes the default CLI with an unavailable handler.
@@ -222,6 +224,11 @@ func setOptionValue(invocation *Invocation, name, value string) error {
 		invocation.Profile = value
 	case "-m", "--model":
 		invocation.Model = value
+	case "--thinking-effort":
+		if strings.TrimSpace(value) == "" {
+			return usageError("thinking effort must not be empty")
+		}
+		invocation.ThinkingEffort = value
 	case "--format":
 		if value != "human" && value != "json" {
 			return usageError("format must be human or json")
@@ -270,7 +277,7 @@ func writeHelp(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: doit [global options] <command> [command options] [arguments]")
 	_, _ = fmt.Fprintln(writer, "")
 	_, _ = fmt.Fprintln(writer, "Commands: init, agent, run, develop, review, test, status, model, config, session, doctor, version")
-	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --format; --ephemeral; --new-session; --timeout")
+	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --thinking-effort; --format; --ephemeral; --new-session; --timeout")
 }
 
 type unavailableHandler struct{}

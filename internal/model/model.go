@@ -32,6 +32,7 @@ type ToolDefinition struct {
 // Request is the provider-neutral model request contract.
 type Request struct {
 	Model           string           `json:"model"`
+	ThinkingEffort  string           `json:"-"`
 	Instructions    string           `json:"instructions,omitempty"`
 	Input           []InputItem      `json:"input,omitempty"`
 	Tools           []ToolDefinition `json:"tools,omitempty"`

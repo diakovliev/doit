@@ -139,6 +139,7 @@ The command creates `.doit/config.json`, `.doit/instructions.md`, instruction an
 | `-C, --directory <path>` | Use another workspace directory. | `doit -C .\sample --profile ollama run "Inspect this project"` |
 | `-p, --profile <name>` | Select a named backend profile. | `doit --profile foundry_deepseek run "Review the code"` |
 | `-m, --model <id>` | Override the profile's model identifier. | `doit --profile ollama --model <model-id> run "Explain the project entrypoint"` |
+| `--thinking-effort <value>` | Override the model's reasoning effort for this invocation. The value is passed through to the backend. | `doit --thinking-effort high run "Review the code"` |
 | `--format human` | Print progress and a human result. | `doit --format human run "Summarize"` |
 | `--format json` | Print one machine-readable result object. | `doit --format json run "Summarize"` |
 | `--ephemeral` | Keep the session in memory and do not persist it. | `doit --ephemeral run "Inspect only"` |
@@ -195,8 +196,9 @@ Provider-specific request parameters can be configured under a backend profile. 
     "reasoning-model": {
       "api_root": "https://example.test/v1",
       "model": "<model-id>",
+      "thinking_effort": "medium",
       "request_parameters": {
-        "reasoning": {"effort": "high"}
+        "reasoning": {"summary": "auto"}
       }
     }
   }
@@ -204,6 +206,8 @@ Provider-specific request parameters can be configured under a backend profile. 
 ```
 
 These values are merged into every provider request. Core fields such as `model`, `input`, `tools`, `stream`, and `max_output_tokens` cannot be overridden. Unsupported parameters remain the backend's responsibility and may be rejected by the provider.
+
+`thinking_effort` is a convenience setting for the provider's `reasoning.effort` value. The `--thinking-effort` option takes precedence over the profile setting. For embedding callers, `agent.Task.ThinkingEffortForRound` can return a different value before each model/tool round, allowing effort to change during an active task without restarting the session. A request-level value overrides the configured reasoning effort while preserving other configured reasoning fields.
 
 An authenticated Microsoft Foundry profile can look like this:
 

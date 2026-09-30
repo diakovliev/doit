@@ -137,6 +137,29 @@ func (client *sequenceClient) Create(_ context.Context, request model.Request) (
 	return response, nil
 }
 
+func TestRunnerChangesThinkingEffortBetweenRounds(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	client := &sequenceClient{responses: []model.Response{
+		{ID: "tool", Status: "in_progress", ToolCalls: []model.ToolCall{{CallID: "read", Name: "fs.read", Arguments: `{"path":"README.md"}`}}},
+		{ID: "done", Status: "completed", Text: "finished"},
+	}}
+	runner.Client = client
+	_, err := runner.Run(context.Background(), Task{Command: "run", Request: "inspect", Workspace: root, Model: "test-model", ThinkingEffort: "low", ThinkingEffortForRound: func(round int) string {
+		if round > 0 {
+			return "high"
+		}
+		return "low"
+	}})
+	if err != nil {
+		t.Fatalf("run dynamic effort task: %v", err)
+	}
+	if len(client.requests) != 2 || client.requests[0].ThinkingEffort != "low" || client.requests[1].ThinkingEffort != "high" {
+		t.Fatalf("unexpected per-round thinking effort: %+v", client.requests)
+	}
+}
+
 func TestRunnerAutomaticallyResumesLatestWorkspaceSession(t *testing.T) {
 	root := t.TempDir()
 	runner, store := newAgentTestRunnerWithEphemeral(t, root, false)

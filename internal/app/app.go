@@ -63,7 +63,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
-	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, Format: invocation.Format, Verbose: invocation.Verbose, Ephemeral: ephemeralOverride(invocation)}})
+	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory, Overrides: config.Overrides{Profile: invocation.Profile, Model: invocation.Model, ThinkingEffort: invocation.ThinkingEffort, Format: invocation.Format, Verbose: invocation.Verbose, Ephemeral: ephemeralOverride(invocation)}})
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 			return promptApproval(approvalContext, input, stdout, action, call)
 		}
 	}
-	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
+	outcome, err := dependencies.runner.Run(ctx, agent.Task{Command: invocation.Command, Request: request, Workspace: configuration.Workspace, Profile: configuration.Profile, Model: dependencies.profile.Model, ThinkingEffort: dependencies.profile.ThinkingEffort, MaxInputTokens: configuration.Token.MaxInputTokens, MaxOutputTokens: configuration.Token.MaxOutputTokens, MaxSessionTokens: configuration.Token.MaxSessionTokens, NonInteractive: invocation.Command != "agent", WorkspaceAutomation: invocation.Command == "run" || invocation.Command == "develop", NewSession: invocation.NewSession})
 	if err != nil {
 		return err
 	}

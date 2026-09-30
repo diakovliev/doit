@@ -135,7 +135,7 @@ func (client *Client) CreateStream(ctx context.Context, request model.Request, o
 }
 
 func (client *Client) marshalRequest(request model.Request) ([]byte, error) {
-	if len(client.requestParameters) == 0 {
+	if len(client.requestParameters) == 0 && request.ThinkingEffort == "" {
 		return json.Marshal(request)
 	}
 	encoded, err := json.Marshal(request)
@@ -148,6 +148,20 @@ func (client *Client) marshalRequest(request model.Request) ([]byte, error) {
 	}
 	for name, value := range client.requestParameters {
 		wire[name] = append(json.RawMessage(nil), value...)
+	}
+	if request.ThinkingEffort != "" {
+		reasoning := map[string]json.RawMessage{}
+		if value, ok := wire["reasoning"]; ok {
+			if err := json.Unmarshal(value, &reasoning); err != nil {
+				return nil, err
+			}
+		}
+		reasoning["effort"] = json.RawMessage(strconv.Quote(request.ThinkingEffort))
+		encodedReasoning, err := json.Marshal(reasoning)
+		if err != nil {
+			return nil, err
+		}
+		wire["reasoning"] = encodedReasoning
 	}
 	return json.Marshal(wire)
 }

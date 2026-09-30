@@ -40,20 +40,22 @@ type ProgressFunc func(ProgressEvent)
 
 // Task describes one model-assisted request.
 type Task struct {
-	Command             string
-	Request             string
-	Instructions        string
-	Paths               []string
-	Workspace           string
-	Profile             string
-	Model               string
-	MaxInputTokens      int
-	MaxOutputTokens     int
-	MaxSessionTokens    int
-	NonInteractive      bool
-	WorkspaceAutomation bool
-	NewSession          bool
-	SessionID           string
+	Command                string
+	Request                string
+	Instructions           string
+	Paths                  []string
+	Workspace              string
+	Profile                string
+	Model                  string
+	ThinkingEffort         string
+	ThinkingEffortForRound func(int) string
+	MaxInputTokens         int
+	MaxOutputTokens        int
+	MaxSessionTokens       int
+	NonInteractive         bool
+	WorkspaceAutomation    bool
+	NewSession             bool
+	SessionID              string
 }
 
 // Outcome is the final normalized task result.
@@ -109,7 +111,7 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 		return Outcome{SessionID: sessionID}, err
 	}
 	runner.emit(ProgressEvent{Phase: "context", Message: "bounded context prepared"})
-	return runner.loop(ctx, sessionID, request, initialUsage, task.MaxInputTokens, task.MaxSessionTokens, task.NonInteractive, task.WorkspaceAutomation)
+	return runner.loop(ctx, sessionID, request, initialUsage, task.MaxInputTokens, task.MaxSessionTokens, task.NonInteractive, task.WorkspaceAutomation, task.ThinkingEffortForRound)
 }
 
 func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata, newSession bool) (session.ID, bool, error) {
@@ -131,7 +133,7 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 	return startedID, false, err
 }
 
-func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
+func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool, thinkingEffortForRound func(int) string) (Outcome, error) {
 	totalUsage := initialUsage
 	changedPaths := make([]string, 0)
 	changeSets := make([]tools.ChangeSet, 0)
@@ -142,7 +144,7 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 		maxRounds = defaultMaxRounds
 	}
 	for round := range maxRounds {
-		response, requestErr := runner.requestRound(ctx, &request, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round)
+		response, requestErr := runner.requestRound(ctx, &request, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round, thinkingEffortForRound)
 		if requestErr != nil {
 			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSessionWithUsage(ctx, sessionID, requestErr, totalUsage)
 		}
@@ -162,7 +164,12 @@ func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request mo
 	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
 }
 
-func (runner *Runner) requestRound(ctx context.Context, request *model.Request, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int) (model.Response, error) {
+func (runner *Runner) requestRound(ctx context.Context, request *model.Request, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int, thinkingEffortForRound func(int) string) (model.Response, error) {
+	if thinkingEffortForRound != nil {
+		if effort := thinkingEffortForRound(round); effort != "" {
+			request.ThinkingEffort = effort
+		}
+	}
 	if _, fitErr := runner.Context.FitRequest(ctx, request, maxInputTokens); fitErr != nil {
 		return model.Response{}, fitErr
 	}
@@ -285,7 +292,7 @@ func (runner *Runner) buildRequest(ctx context.Context, task Task, previous *ses
 	for _, definition := range definitions {
 		modelTools = append(modelTools, model.ToolDefinition{Type: "function", Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters})
 	}
-	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, ThinkingEffort: task.ThinkingEffort, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
 }
 
 func resumeHistory(record *session.Record) []model.InputItem {

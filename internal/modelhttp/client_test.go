@@ -73,6 +73,34 @@ func TestClientSendsConfiguredRequestParameters(t *testing.T) {
 	}
 }
 
+func TestClientRequestThinkingEffortOverridesConfiguredReasoningEffort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			http.Error(writer, "invalid request", http.StatusBadRequest)
+			return
+		}
+		var reasoning struct {
+			Effort  string `json:"effort"`
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal(payload["reasoning"], &reasoning); err != nil || reasoning.Effort != "low" || reasoning.Summary != "auto" {
+			http.Error(writer, "request effort was not overridden", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"effort-response","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model", RequestParameters: map[string]json.RawMessage{"reasoning": json.RawMessage(`{"effort":"high","summary":"auto"}`)}}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := client.Create(context.Background(), model.Request{Model: "test-model", ThinkingEffort: "low"}); err != nil {
+		t.Fatalf("create effort response: %v", err)
+	}
+}
+
 func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Accept") != "text/event-stream" {

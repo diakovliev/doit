@@ -20,6 +20,7 @@ import (
 type BackendProfile struct {
 	APIRoot           string                     `json:"api_root"`
 	Model             string                     `json:"model"`
+	ThinkingEffort    string                     `json:"thinking_effort,omitempty"`
 	Streaming         bool                       `json:"streaming,omitempty"`
 	APIKeyEnv         string                     `json:"api_key_env,omitempty"`
 	Headers           map[string]string          `json:"headers,omitempty"`
@@ -90,13 +91,14 @@ type Config struct {
 
 // Overrides are values supplied by environment variables or CLI flags.
 type Overrides struct {
-	Profile   string
-	Model     string
-	APIRoot   string
-	APIKeyEnv string
-	Format    string
-	Verbose   bool
-	Ephemeral *bool
+	Profile        string
+	Model          string
+	ThinkingEffort string
+	APIRoot        string
+	APIKeyEnv      string
+	Format         string
+	Verbose        bool
+	Ephemeral      *bool
 }
 
 // LoadOptions controls configuration source locations and overrides.
@@ -507,13 +509,16 @@ func applyOverrides(result *Config, overrides Overrides) {
 	if overrides.Model != "" {
 		profile.Model = overrides.Model
 	}
+	if overrides.ThinkingEffort != "" {
+		profile.ThinkingEffort = overrides.ThinkingEffort
+	}
 	if overrides.APIRoot != "" {
 		profile.APIRoot = strings.TrimRight(overrides.APIRoot, "/")
 	}
 	if overrides.APIKeyEnv != "" {
 		profile.APIKeyEnv = overrides.APIKeyEnv
 	}
-	if overrides.Model != "" || overrides.APIRoot != "" || overrides.APIKeyEnv != "" {
+	if overrides.Model != "" || overrides.ThinkingEffort != "" || overrides.APIRoot != "" || overrides.APIKeyEnv != "" {
 		result.Profiles[result.Profile] = profile
 	}
 	applyOutputOverrides(result, overrides)
