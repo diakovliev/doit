@@ -51,8 +51,15 @@ func TestRunCompletesAgainstDeterministicResponsesBackend(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("expected successful CLI run, status=%d stderr=%q", status, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "repository explained") || !strings.Contains(stdout.String(), "input_tokens=4") || !strings.Contains(stdout.String(), "context_tokens_total=") || !strings.Contains(stdout.String(), "step=1 context_tokens=") || !strings.Contains(stdout.String(), "generation_tokens_per_second=unknown") || !strings.Contains(stdout.String(), "request_wall_clock_tokens_per_second=") {
-		t.Fatalf("unexpected CLI output: %q", stdout.String())
+	assertMetricCLIOutput(t, stdout.String())
+}
+
+func assertMetricCLIOutput(t *testing.T, output string) {
+	t.Helper()
+	for _, expected := range []string{"repository explained", "input_tokens=4", "context_tokens_total=", "[doit] metrics: step=1 context=", "generation_tps=unknown", "request_tps=", "average_metrics steps=1"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("CLI output missing %q: %s", expected, output)
+		}
 	}
 }
 
@@ -100,12 +107,12 @@ func TestWriteHumanSession(t *testing.T) {
 }
 
 func TestWriteMarkdownSession(t *testing.T) {
-	record := session.Record{Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Model: "test-model"}, Events: []session.Event{{Sequence: 1, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done"}`)}}, Result: &session.Result{Summary: "done\n\n- detail", ChangedPaths: []string{"README.md"}, ContextTokensTotal: 1200, Steps: []usage.StepMetrics{{Round: 1, ContextTokens: 1200, ContextSource: usage.SourceEstimate, ProviderInputTokens: pointerApp(1100), OutputTokens: 200, OutputSource: usage.SourceProvider, RequestDurationMs: 2000, RequestWallClockTokensPerSecond: 100, GenerationDurationMs: 1000, OutputTokensPerSecond: pointerAppRate(200)}}}}
+	record := session.Record{Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Model: "test-model"}, Events: []session.Event{{Sequence: 1, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done"}`)}}, Result: &session.Result{Summary: "done\n\n- detail", ChangedPaths: []string{"README.md"}, ContextTokensTotal: 1200, Steps: []usage.StepMetrics{{Round: 1, ContextTokens: 1200, ContextSource: usage.SourceEstimate, ProviderInputTokens: pointerApp(1100), OutputTokens: 200, OutputSource: usage.SourceProvider, RequestDurationMs: 2000, RequestWallClockTokensPerSecond: 100, GenerationDurationMs: 1000, OutputTokensPerSecond: pointerAppRate(200)}}, StepSummary: usage.SummarizeSteps([]usage.StepMetrics{{ContextTokens: 1200, RequestWallClockTokensPerSecond: 100, OutputTokensPerSecond: pointerAppRate(200)}})}}
 	var output bytes.Buffer
 	if err := writeMarkdownSession(&output, record); err != nil {
 		t.Fatalf("write markdown session: %v", err)
 	}
-	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| # | Time | Type | Status | Tool calls | Text |", "| 1 |", "completed", "| 0 | done |", "## Full Text", "<summary>Event #1 (model_message)</summary>", "<pre>done</pre>", "## Result", "### Summary", "- detail", "Context tokens across model rounds:** 1200", "### Model Steps", "| Step | Context | Provider input | Output | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |", "| 1 | 1200 `local-estimate` | 1100 | 200 | `provider` | 200.00 | 1000 ms | 100.00 | 2000 ms |", "### Changed Paths", "- `README.md`"} {
+	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| # | Time | Type | Status | Tool calls | Text |", "| 1 |", "completed", "| 0 | done |", "## Full Text", "<summary>Event #1 (model_message)</summary>", "<pre>done</pre>", "## Result", "### Summary", "- detail", "Context tokens across model rounds:** 1200", "### Model Steps", "| Step | Context | Provider input | Output | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |", "| 1 | 1200 `local-estimate` | 1100 | 200 | `provider` | 200.00 | 1000 ms | 100.00 | 2000 ms |", "### Average Metrics", "Context tokens per step: 1200", "Generation tokens/sec: 200.00 across 1 streamed step(s)", "Request-wall tokens/sec: 100.00", "### Changed Paths", "- `README.md`"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("markdown session output missing %q: %s", expected, output.String())
 		}

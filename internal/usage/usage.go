@@ -19,6 +19,57 @@ type StepMetrics struct {
 	LegacyDurationMs                int64    `json:"duration_ms,omitempty"`
 }
 
+// StepSummary aggregates per-round context and throughput values for users.
+type StepSummary struct {
+	Steps                         int      `json:"steps"`
+	AverageContextTokens          float64  `json:"average_context_tokens"`
+	AverageGenerationTokensPerSec *float64 `json:"average_generation_tokens_per_second,omitempty"`
+	GenerationMeasuredSteps       int      `json:"generation_measured_steps"`
+	AverageRequestTokensPerSecond float64  `json:"average_request_wall_clock_tokens_per_second"`
+}
+
+// SummarizeSteps returns arithmetic per-round averages, excluding unmeasured generation rates.
+func SummarizeSteps(steps []StepMetrics) StepSummary {
+	if len(steps) == 0 {
+		return StepSummary{}
+	}
+	var contextTotal int64
+	var requestRateTotal float64
+	var generationRateTotal float64
+	requestRateCount := 0
+	generationRateCount := 0
+	for _, step := range steps {
+		contextTotal += step.ContextTokens
+		if rate, ok := stepRequestWallRate(step); ok {
+			requestRateTotal += rate
+			requestRateCount++
+		}
+		if step.OutputTokensPerSecond != nil && step.LegacyDurationKind != "request_wall_clock" {
+			generationRateTotal += *step.OutputTokensPerSecond
+			generationRateCount++
+		}
+	}
+	summary := StepSummary{Steps: len(steps), AverageContextTokens: float64(contextTotal) / float64(len(steps)), GenerationMeasuredSteps: generationRateCount}
+	if requestRateCount > 0 {
+		summary.AverageRequestTokensPerSecond = requestRateTotal / float64(requestRateCount)
+	}
+	if generationRateCount > 0 {
+		generationAverage := generationRateTotal / float64(generationRateCount)
+		summary.AverageGenerationTokensPerSec = &generationAverage
+	}
+	return summary
+}
+
+func stepRequestWallRate(step StepMetrics) (float64, bool) {
+	if step.RequestWallClockTokensPerSecond > 0 {
+		return step.RequestWallClockTokensPerSecond, true
+	}
+	if step.LegacyDurationKind == "request_wall_clock" && step.OutputTokensPerSecond != nil {
+		return *step.OutputTokensPerSecond, true
+	}
+	return 0, false
+}
+
 // Source describes where token counts came from.
 type Source string
 

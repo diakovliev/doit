@@ -318,21 +318,36 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	runner, store := newAgentTestRunner(t, root)
 	defer func() { _ = store.Close() }()
 	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "read README", Workspace: root, Model: "test-model"})
-	if err != nil || outcome.Text != "finished" || outcome.SessionID == "" {
-		t.Fatalf("unexpected outcome: %+v, error=%v", outcome, err)
-	}
+	assertCompletedMetricOutcome(t, outcome, err)
 	assertStepMetrics(t, outcome.Steps)
-	if outcome.ContextTokensTotal == 0 {
-		t.Fatalf("expected accumulated context tokens: %+v", outcome)
-	}
+	assertNonStreamingStepSummary(t, outcome.StepSummary)
 	record, err := store.Load(context.Background(), outcome.SessionID)
 	if err != nil || len(record.Events) < 3 || record.Result == nil {
 		t.Fatalf("unexpected session: %+v, error=%v", record, err)
 	}
-	if len(record.Result.Steps) != len(outcome.Steps) || record.Result.ContextTokensTotal != outcome.ContextTokensTotal {
-		t.Fatalf("step metrics were not persisted: %+v", record.Result)
-	}
+	assertPersistedStepMetrics(t, record.Result, outcome)
 	assertStepMetricEvents(t, record.Events, len(outcome.Steps))
+}
+
+func assertCompletedMetricOutcome(t *testing.T, outcome Outcome, err error) {
+	t.Helper()
+	if err != nil || outcome.Text != "finished" || outcome.SessionID == "" || outcome.ContextTokensTotal == 0 {
+		t.Fatalf("unexpected metrics outcome: %+v, error=%v", outcome, err)
+	}
+}
+
+func assertNonStreamingStepSummary(t *testing.T, summary usage.StepSummary) {
+	t.Helper()
+	if summary.Steps != 2 || summary.GenerationMeasuredSteps != 0 || summary.AverageGenerationTokensPerSec != nil {
+		t.Fatalf("non-streaming task reported generation throughput: %+v", summary)
+	}
+}
+
+func assertPersistedStepMetrics(t *testing.T, result *session.Result, outcome Outcome) {
+	t.Helper()
+	if len(result.Steps) != len(outcome.Steps) || result.ContextTokensTotal != outcome.ContextTokensTotal || result.StepSummary != outcome.StepSummary {
+		t.Fatalf("step metrics were not persisted: %+v", result)
+	}
 }
 
 func assertStepMetricEvents(t *testing.T, events []session.Event, expected int) {

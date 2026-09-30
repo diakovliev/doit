@@ -69,6 +69,7 @@ type Outcome struct {
 	Text               string               `json:"text"`
 	Usage              usage.Counts         `json:"usage"`
 	Steps              []usage.StepMetrics  `json:"steps,omitempty"`
+	StepSummary        usage.StepSummary    `json:"step_summary"`
 	ContextTokensTotal int64                `json:"context_tokens_total"`
 	ChangedPaths       []string             `json:"changed_paths,omitempty"`
 	ChangeSets         []tools.ChangeSet    `json:"change_sets,omitempty"`
@@ -282,7 +283,7 @@ func cloneTokenCount(value *int64) *int64 {
 }
 
 func stepMetricsMessage(metrics usage.StepMetrics) string {
-	return fmt.Sprintf("round=%d context_tokens=%d context_source=%s provider_input_tokens=%s output_tokens=%d output_source=%s generation_tokens_per_second=%s generation_duration_ms=%s request_wall_clock_tokens_per_second=%.2f request_duration_ms=%d", metrics.Round, metrics.ContextTokens, metrics.ContextSource, usageValueString(metrics.ProviderInputTokens), metrics.OutputTokens, metrics.OutputSource, optionalRate(metrics.OutputTokensPerSecond), optionalDuration(metrics.GenerationDurationMs), metrics.RequestWallClockTokensPerSecond, metrics.RequestDurationMs)
+	return fmt.Sprintf("step=%d context=%d tokens generation_tps=%s request_tps=%.2f output=%d", metrics.Round, metrics.ContextTokens, optionalRate(metrics.OutputTokensPerSecond), metrics.RequestWallClockTokensPerSecond, metrics.OutputTokens)
 }
 
 func optionalRate(value *float64) string {
@@ -292,26 +293,12 @@ func optionalRate(value *float64) string {
 	return strconv.FormatFloat(*value, 'f', 2, 64)
 }
 
-func optionalDuration(milliseconds int64) string {
-	if milliseconds <= 0 {
-		return "unknown"
-	}
-	return strconv.FormatInt(milliseconds, 10)
-}
-
 func (runner *Runner) recordStepMetrics(ctx context.Context, sessionID session.ID, metrics usage.StepMetrics) error {
 	if err := runner.appendEvent(ctx, sessionID, "step_metrics", metrics); err != nil {
 		return err
 	}
 	runner.emit(ProgressEvent{Phase: "metrics", Message: stepMetricsMessage(metrics), Round: metrics.Round})
 	return nil
-}
-
-func usageValueString(value *int64) string {
-	if value == nil {
-		return "unknown"
-	}
-	return strconv.FormatInt(*value, 10)
 }
 
 func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts, steps []usage.StepMetrics, contextTokensTotal int64) (Outcome, bool, error) {
@@ -335,7 +322,7 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, nil
 	}
 	runner.emit(ProgressEvent{Phase: "model", Message: "finished composing public response"})
-	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, Steps: append([]usage.StepMetrics(nil), steps...), ContextTokensTotal: contextTokensTotal, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
+	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, Steps: append([]usage.StepMetrics(nil), steps...), StepSummary: usage.SummarizeSteps(steps), ContextTokensTotal: contextTokensTotal, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
 	if err := runner.completeSession(ctx, sessionID, outcome); err != nil {
 		return outcome, false, err
 	}
@@ -792,7 +779,7 @@ func (runner *Runner) appendEvent(ctx context.Context, id session.ID, eventType 
 }
 
 func (runner *Runner) completeSession(ctx context.Context, id session.ID, outcome Outcome) error {
-	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, ChangeSets: outcome.ChangeSets, Validations: outcome.Validations, Usage: outcome.Usage, Steps: outcome.Steps, ContextTokensTotal: outcome.ContextTokensTotal})
+	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, ChangeSets: outcome.ChangeSets, Validations: outcome.Validations, Usage: outcome.Usage, Steps: outcome.Steps, StepSummary: outcome.StepSummary, ContextTokensTotal: outcome.ContextTokensTotal})
 }
 
 func (runner *Runner) failSession(ctx context.Context, id session.ID, err error) error {

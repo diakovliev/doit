@@ -93,6 +93,7 @@ type Result struct {
 	Unresolved         []string            `json:"unresolved,omitempty"`
 	Usage              usage.Counts        `json:"usage"`
 	Steps              []usage.StepMetrics `json:"steps,omitempty"`
+	StepSummary        usage.StepSummary   `json:"step_summary,omitempty"`
 	ContextTokensTotal int64               `json:"context_tokens_total,omitempty"`
 }
 

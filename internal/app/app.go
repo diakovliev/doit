@@ -498,6 +498,9 @@ func writeMarkdownResult(writer io.Writer, result *session.Result) error {
 	if err := writeSessionStepMetrics(writer, result.Steps, true); err != nil {
 		return err
 	}
+	if err := writeStepSummary(writer, result.StepSummary, true); err != nil {
+		return err
+	}
 	if err := writeMarkdownChangedPaths(writer, result.ChangedPaths); err != nil {
 		return err
 	}
@@ -593,6 +596,9 @@ func writeSessionResult(writer io.Writer, result *session.Result) error {
 		return err
 	}
 	if err := writeSessionStepMetrics(writer, result.Steps, false); err != nil {
+		return err
+	}
+	if err := writeStepSummary(writer, result.StepSummary, false); err != nil {
 		return err
 	}
 	if len(result.ChangedPaths) > 0 {
@@ -704,6 +710,19 @@ func pruneSessions(ctx context.Context, invocation cli.Invocation, stdout io.Wri
 		return json.NewEncoder(stdout).Encode(map[string]any{"removed": removed, "kept": keep})
 	}
 	_, err = fmt.Fprintf(stdout, "removed=%d kept=%d\n", removed, keep)
+	return err
+}
+
+func writeStepSummary(writer io.Writer, summary usage.StepSummary, markdown bool) error {
+	if summary.Steps == 0 {
+		return nil
+	}
+	generationRate := optionalMetricRate(summary.AverageGenerationTokensPerSec)
+	if markdown {
+		_, err := fmt.Fprintf(writer, "### Average Metrics\n\n- Steps: %d\n- Context tokens per step: %.0f\n- Generation tokens/sec: %s across %d streamed step(s)\n- Request-wall tokens/sec: %.2f\n", summary.Steps, summary.AverageContextTokens, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
+		return err
+	}
+	_, err := fmt.Fprintf(writer, "average_metrics steps=%d context_tokens_per_step=%.0f generation_tokens_per_second=%s generation_steps=%d request_wall_clock_tokens_per_second=%.2f\n", summary.Steps, summary.AverageContextTokens, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
 	return err
 }
 
@@ -995,7 +1014,10 @@ func writeOutcome(writer io.Writer, format string, outcome agent.Outcome) error 
 	if _, err := fmt.Fprintf(writer, "session=%s input_tokens=%s output_tokens=%s total_tokens=%s source=%s exact=%t context_tokens_total=%d\n", outcome.SessionID, usageValue(outcome.Usage.InputTokens), usageValue(outcome.Usage.OutputTokens), usageValue(outcome.Usage.TotalTokens), outcome.Usage.Source, outcome.Usage.Exact, outcome.ContextTokensTotal); err != nil {
 		return err
 	}
-	return writeSessionStepMetrics(writer, outcome.Steps, false)
+	if err := writeSessionStepMetrics(writer, outcome.Steps, false); err != nil {
+		return err
+	}
+	return writeStepSummary(writer, outcome.StepSummary, false)
 }
 
 func writeSessionStepMetrics(writer io.Writer, steps []usage.StepMetrics, markdown bool) error {
