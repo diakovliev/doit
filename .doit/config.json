@@ -7,8 +7,8 @@
     },
     "ollama": {
       "api_root": "http://127.0.0.1:11434/v1",
-      "__model": "gemma4:31b-mlx",
-      "model": "qwen3.8:27b-mlx",
+      "model": "gemma4:31b-mlx",
+      "__model": "qwen3.8:27b-mlx",
       "_model": "qwen3-coder:30b",
       "streaming": true,
       "thinking_effort": "medium",
