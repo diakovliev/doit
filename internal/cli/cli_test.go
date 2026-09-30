@@ -57,6 +57,16 @@ func TestParseGlobalInit(t *testing.T) {
 	}
 }
 
+func TestParseMarkdownFormatAlias(t *testing.T) {
+	invocation, err := Parse([]string{"--format", "md", "session", "inspect"})
+	if err != nil {
+		t.Fatalf("parse markdown format: %v", err)
+	}
+	if invocation.Format != "markdown" {
+		t.Fatalf("expected normalized markdown format, got %q", invocation.Format)
+	}
+}
+
 func TestParseDevelopCarriesRequest(t *testing.T) {
 	invocation, err := Parse([]string{"develop", "add", "coverage"})
 	if err != nil {

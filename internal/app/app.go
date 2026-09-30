@@ -358,14 +358,201 @@ func listSessions(ctx context.Context, invocation cli.Invocation, stdout io.Writ
 }
 
 func inspectSession(ctx context.Context, invocation cli.Invocation, stdout io.Writer, store *session.FileStore, command string) error {
-	if len(invocation.Arguments) < 2 {
-		return apperr.New(apperr.KindUsage, "app.session", command+" requires a session id")
-	}
-	record, err := store.Load(ctx, session.ID(invocation.Arguments[1]))
+	sessionID, err := inspectionSessionID(ctx, invocation, store, command)
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(stdout).Encode(record)
+	record, err := store.Load(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if invocation.Format == "json" || command == "export" {
+		return json.NewEncoder(stdout).Encode(record)
+	}
+	if invocation.Format == "markdown" || invocation.Format == "md" {
+		return writeMarkdownSession(stdout, record)
+	}
+	return writeHumanSession(stdout, record)
+}
+
+func inspectionSessionID(ctx context.Context, invocation cli.Invocation, store *session.FileStore, command string) (session.ID, error) {
+	if len(invocation.Arguments) >= 2 {
+		return session.ID(invocation.Arguments[1]), nil
+	}
+	if command != "inspect" {
+		return "", apperr.New(apperr.KindUsage, "app.session", command+" requires a session id")
+	}
+	latestID, found, err := store.Latest(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", apperr.New(apperr.KindUsage, "app.session", "no completed session is available to inspect")
+	}
+	return latestID, nil
+}
+
+func writeMarkdownSession(writer io.Writer, record session.Record) error {
+	metadata := record.Metadata
+	if _, err := fmt.Fprintf(writer, "# Session `%s`\n\n", markdownEscape(string(metadata.ID))); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "| Field | Value |\n| --- | --- |\n| Status | `%s` |\n| Command | `%s` |\n| Profile | `%s` |\n| Model | `%s` |\n| Workspace | `%s` |\n| Created | `%s` |\n| Updated | `%s` |\n| Resumable | `%t` |\n\n", markdownEscape(string(metadata.Status)), markdownEscape(metadata.Command), markdownEscape(metadata.Profile), markdownEscape(metadata.Model), markdownEscape(metadata.InvocationPath), metadata.CreatedAt.Format(time.RFC3339), metadata.UpdatedAt.Format(time.RFC3339), metadata.Resumable); err != nil {
+		return err
+	}
+	if err := writeMarkdownEvents(writer, record.Events); err != nil {
+		return err
+	}
+	return writeMarkdownResult(writer, record.Result)
+}
+
+func writeMarkdownEvents(writer io.Writer, events []session.Event) error {
+	if _, err := fmt.Fprintln(writer, "## Events\n\n| Sequence | Timestamp | Type | Summary |\n| ---: | --- | --- | --- |"); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if _, err := fmt.Fprintf(writer, "| %d | %s | `%s` | %s |\n", event.Sequence, event.Timestamp.Format(time.RFC3339), markdownEscape(event.Type), markdownEscape(humanEventSummary(event))); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(writer)
+	return err
+}
+
+func writeMarkdownResult(writer io.Writer, result *session.Result) error {
+	if _, err := fmt.Fprint(writer, "## Result\n\n"); err != nil {
+		return err
+	}
+	if result == nil {
+		_, err := fmt.Fprintln(writer, "No result recorded.")
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "**Summary:** %s  \n**Usage:** `%s`\n\n", markdownEscape(result.Summary), markdownEscape(formatUsage(result.Usage))); err != nil {
+		return err
+	}
+	if len(result.ChangedPaths) > 0 {
+		if _, err := fmt.Fprintf(writer, "**Changed paths:** `%s`\n\n", markdownEscape(strings.Join(result.ChangedPaths, "`, `"))); err != nil {
+			return err
+		}
+	}
+	if len(result.Validations) > 0 {
+		if _, err := fmt.Fprint(writer, "| Validation | Passed | Exit code | Duration |\n| --- | ---: | ---: | --- |\n\n"); err != nil {
+			return err
+		}
+		for _, validation := range result.Validations {
+			if _, err := fmt.Fprintf(writer, "| `%s` | %t | %d | %s |\n", markdownEscape(validation.Task), validation.Passed, validation.ExitCode, validation.Duration.Round(time.Millisecond)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func markdownEscape(value string) string {
+	value = strings.ReplaceAll(value, "|", "\\|")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return value
+}
+
+func writeHumanSession(writer io.Writer, record session.Record) error {
+	metadata := record.Metadata
+	if err := writeSessionHeader(writer, metadata, len(record.Events)); err != nil {
+		return err
+	}
+	if err := writeSessionEvents(writer, record.Events); err != nil {
+		return err
+	}
+	return writeSessionResult(writer, record.Result)
+}
+
+func writeSessionHeader(writer io.Writer, metadata session.Metadata, eventCount int) error {
+	_, err := fmt.Fprintf(writer, "Session %s\nstatus=%s command=%s profile=%s model=%s\nworkspace=%s\ncreated=%s updated=%s resumable=%t\nevents=%d\n", metadata.ID, metadata.Status, metadata.Command, metadata.Profile, metadata.Model, metadata.InvocationPath, metadata.CreatedAt.Format(time.RFC3339), metadata.UpdatedAt.Format(time.RFC3339), metadata.Resumable, eventCount)
+	return err
+}
+
+func writeSessionEvents(writer io.Writer, events []session.Event) error {
+	for _, event := range events {
+		if _, err := fmt.Fprintf(writer, "  #%d %s %s", event.Sequence, event.Timestamp.Format(time.RFC3339), event.Type); err != nil {
+			return err
+		}
+		if summary := humanEventSummary(event); summary != "" {
+			if _, err := fmt.Fprint(writer, ": "+summary); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(writer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeSessionResult(writer io.Writer, result *session.Result) error {
+	if result == nil {
+		_, err := fmt.Fprintln(writer, "result=none")
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "result=%s\nusage=%s\n", result.Summary, formatUsage(result.Usage)); err != nil {
+		return err
+	}
+	if len(result.ChangedPaths) > 0 {
+		if _, err := fmt.Fprintln(writer, "changed_paths="+strings.Join(result.ChangedPaths, ",")); err != nil {
+			return err
+		}
+	}
+	for _, validation := range result.Validations {
+		if _, err := fmt.Fprintf(writer, "validation=%s passed=%t exit_code=%d duration=%s\n", validation.Task, validation.Passed, validation.ExitCode, validation.Duration.Round(time.Millisecond)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func humanEventSummary(event session.Event) string {
+	switch event.Type {
+	case "request":
+		var request model.Request
+		if json.Unmarshal(event.Data, &request) == nil {
+			for index := len(request.Input) - 1; index >= 0; index-- {
+				if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
+					return "prompt=" + publicSessionPreview(request.Input[index].Content)
+				}
+			}
+		}
+	case "model_message":
+		var response model.Response
+		if json.Unmarshal(event.Data, &response) == nil {
+			return fmt.Sprintf("status=%s tool_calls=%d text=%s", response.Status, len(response.ToolCalls), publicSessionPreview(response.Text))
+		}
+	case "tool_result":
+		var result tools.Result
+		if json.Unmarshal(event.Data, &result) == nil {
+			return fmt.Sprintf("status=%s", result.Status)
+		}
+	}
+	return ""
+}
+
+func publicSessionPreview(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		return "-"
+	}
+	if len(value) > 160 {
+		return value[:160] + "..."
+	}
+	return value
+}
+
+func formatUsage(counts usage.Counts) string {
+	return fmt.Sprintf("input=%d output=%d total=%d", usageCount(counts.InputTokens), usageCount(counts.OutputTokens), usageCount(counts.TotalTokens))
+}
+
+func usageCount(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func pruneSessions(ctx context.Context, invocation cli.Invocation, stdout io.Writer, store *session.FileStore) error {

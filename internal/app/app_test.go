@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/diakovliev/doit/internal/agent"
 	"github.com/diakovliev/doit/internal/cli"
@@ -18,6 +20,7 @@ import (
 	"github.com/diakovliev/doit/internal/policy"
 	"github.com/diakovliev/doit/internal/process"
 	"github.com/diakovliev/doit/internal/processrunner"
+	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
 	"github.com/diakovliev/doit/internal/workspacefs"
 )
@@ -71,6 +74,69 @@ func TestProgressLineKeepsCapturedOutputLineOriented(t *testing.T) {
 
 	if output.String() != "[doit] model: captured action\n" {
 		t.Fatalf("unexpected captured progress output: %q", output.String())
+	}
+}
+
+func TestWriteHumanSession(t *testing.T) {
+	created := time.Date(2026, time.September, 30, 10, 0, 0, 0, time.UTC)
+	result := session.Record{
+		Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Profile: "local", Model: "test-model", InvocationPath: "/workspace", CreatedAt: created, UpdatedAt: created, Resumable: true},
+		Events: []session.Event{
+			{Sequence: 1, Timestamp: created, Type: "request", Data: json.RawMessage(`{"input":[{"type":"message","role":"user","content":"inspect the repository"}]}`)},
+			{Sequence: 2, Timestamp: created, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done","tool_calls":[]}`)},
+		},
+		Result: &session.Result{Summary: "done", ChangedPaths: []string{"README.md"}},
+	}
+	var output bytes.Buffer
+	if err := writeHumanSession(&output, result); err != nil {
+		t.Fatalf("write human session: %v", err)
+	}
+	for _, expected := range []string{"Session session-1", "status=completed", "#1", "prompt=inspect the repository", "text=done", "result=done", "changed_paths=README.md"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("human session output missing %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestWriteMarkdownSession(t *testing.T) {
+	record := session.Record{Metadata: session.Metadata{ID: "session-1", Status: session.StatusCompleted, Command: "run", Model: "test-model"}, Events: []session.Event{{Sequence: 1, Type: "model_message", Data: json.RawMessage(`{"status":"completed","text":"done"}`)}}, Result: &session.Result{Summary: "done", ChangedPaths: []string{"README.md"}}}
+	var output bytes.Buffer
+	if err := writeMarkdownSession(&output, record); err != nil {
+		t.Fatalf("write markdown session: %v", err)
+	}
+	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| 1 |", "## Result", "**Summary:** done", "README.md"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("markdown session output missing %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestInspectSessionDefaultsToLatest(t *testing.T) {
+	store, err := session.NewFileStore(session.Options{InvocationPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new session store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	first, err := store.Start(context.Background(), session.Metadata{Command: "run", Model: "first"})
+	if err != nil {
+		t.Fatalf("start first session: %v", err)
+	}
+	if err := store.Complete(context.Background(), first, session.Result{Summary: "first result"}); err != nil {
+		t.Fatalf("complete first session: %v", err)
+	}
+	second, err := store.Start(context.Background(), session.Metadata{Command: "run", Model: "second"})
+	if err != nil {
+		t.Fatalf("start second session: %v", err)
+	}
+	if err := store.Complete(context.Background(), second, session.Result{Summary: "latest result"}); err != nil {
+		t.Fatalf("complete second session: %v", err)
+	}
+	var output bytes.Buffer
+	if err := inspectSession(context.Background(), cli.Invocation{Arguments: []string{"inspect"}}, &output, store, "inspect"); err != nil {
+		t.Fatalf("inspect latest session: %v", err)
+	}
+	if !strings.Contains(output.String(), "latest result") || strings.Contains(output.String(), "first result") {
+		t.Fatalf("inspection did not select latest session: %s", output.String())
 	}
 }
 

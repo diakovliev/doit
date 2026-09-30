@@ -272,8 +272,11 @@ func setThinkingEffort(invocation *Invocation, value string) error {
 }
 
 func setFormat(invocation *Invocation, value string) error {
-	if value != "human" && value != "json" {
-		return usageError("format must be human or json")
+	if value != "human" && value != "json" && value != "md" && value != "markdown" {
+		return usageError("format must be human, json, or markdown")
+	}
+	if value == "md" {
+		value = "markdown"
 	}
 	invocation.Format = value
 	return nil
