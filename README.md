@@ -106,6 +106,7 @@ Implemented command paths:
 | Command | Purpose |
 | --- | --- |
 | `doit init` | Create project-local `.doit` configuration, instruction, and skill templates without contacting a model. Existing files are preserved. |
+| `doit init --global` | Create the global `~/.doit` configuration, instruction, and skill templates. Existing files are preserved. `doit --global init` is also accepted. |
 | `doit` | Start the default agent request flow. |
 | `doit agent` | Run an agent request, reading a prompt from stdin when no prompt argument is supplied. |
 | `doit run <request>` | Run one development-oriented request and exit. |
@@ -128,9 +129,10 @@ Initialize a workspace before adding project-specific guidance:
 ```powershell
 doit init
 doit -C .\sample init
+doit init --global
 ```
 
-The command creates `.doit/config.json`, `.doit/instructions.md`, instruction and skill README files, and an example skill template. It never overwrites an existing scaffold file, so it can be run again after the project has been customized.
+The project command creates `.doit/config.json`, `.doit/instructions.md`, instruction and skill README files, and an example skill template. `doit init --global` creates the equivalent files below `~/.doit` for user-wide defaults. Neither command overwrites an existing scaffold file, so both can be run again after customization.
 
 ## Global Options
 
@@ -157,7 +159,7 @@ doit --profile ollama run -- "Explain the files under internal."
 
 ## Backend Configuration
 
-Project configuration is stored in `.doit/config.json`. Keep credentials out of this file.
+Global user configuration is stored in `~/.doit/config.json`; project configuration is stored in `.doit/config.json`. The global `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md` files are loaded before project-specific guidance and skills. Project settings and guidance can override or refine global defaults. Keep credentials out of both configuration files.
 
 A local Ollama profile can look like this:
 
@@ -197,6 +199,17 @@ Provider-specific request parameters can be configured under a backend profile. 
       "api_root": "https://example.test/v1",
       "model": "<model-id>",
       "thinking_effort": "medium",
+      "tool_profile": "inspect",
+      "token": {
+        "max_input_tokens": 12000,
+        "max_output_tokens": 3000,
+        "max_session_tokens": 24000
+      },
+      "context": {
+        "include_guidance": true,
+        "include_git_status": false,
+        "include_workspace_listing": true
+      },
       "request_parameters": {
         "reasoning": {"summary": "auto"}
       }
@@ -208,6 +221,10 @@ Provider-specific request parameters can be configured under a backend profile. 
 These values are merged into every provider request. Core fields such as `model`, `input`, `tools`, `stream`, and `max_output_tokens` cannot be overridden. Unsupported parameters remain the backend's responsibility and may be rejected by the provider.
 
 `thinking_effort` is a convenience setting for the provider's `reasoning.effort` value. The `--thinking-effort` option takes precedence over the profile setting. For embedding callers, `agent.Task.ThinkingEffortForRound` can return a different value before each model/tool round, allowing effort to change during an active task without restarting the session. A request-level value overrides the configured reasoning effort while preserving other configured reasoning fields.
+
+The optional profile `token` object overrides the global token budget for that model. `max_input_tokens` bounds each model context window, `max_output_tokens` bounds each response, and `max_session_tokens` is the cumulative session threshold. Unspecified profile values inherit the global `token` settings.
+
+The optional profile `context` object controls material included automatically in each request. Guidance, Git status, and the bounded workspace listing can each be disabled. Explicit paths and model tool results remain separate from this automatic context policy. `tool_profile` controls which capabilities are exposed to the model, such as `inspect`, `small-edit`, `validate`, or `full`; disabling automatic context does not grant access to tools that the selected tool profile excludes.
 
 The model can also request a temporary effort change with the read-only `agent.set_thinking_effort` tool. It accepts `low`, `medium`, or `high` and applies the selection to the next model round only; the configured baseline is restored afterward. Use `low` for routine steps and escalate only when the next step requires substantial synthesis or careful planning. Invalid effort values are rejected and cannot change the request.
 
@@ -271,7 +288,7 @@ DOIT_EPHEMERAL
 
 The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `small-edit`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. `small-edit` exposes read-only inspection plus exact structured edit tools, but not broad patches, process execution, or Git mutation. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
 
-Configuration precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, and command-line flags.
+Configuration precedence is built-in defaults, global `~/.doit/config.json`, project `.doit/config.json`, `DOIT_*` environment overrides, and command-line flags. When a backend profile exists at both levels, project fields override matching global fields while unspecified global fields are preserved.
 
 ## Ollama in Docker
 

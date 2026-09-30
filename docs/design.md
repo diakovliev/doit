@@ -176,7 +176,7 @@ Context selection should be explicit and inspectable. The builder must avoid sen
 
 When session history is trimmed to fit the input budget, function-call and function-call-output items must be removed as an atomic pair. Resumed history must discard orphaned or incomplete tool items before a provider request so the Responses API never receives a function output without its matching call.
 
-Repository guidance discovery is an explicit allowlist. It reads `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
+Repository guidance discovery is an explicit allowlist. It reads global `~/.doit/instructions.md`, `~/.doit/instructions/*.md`, and `~/.doit/skills/*/SKILL.md` first, then project `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate; project guidance is later and can refine global guidance. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
 
 #### Session Context and History Retrieval
 
@@ -494,7 +494,7 @@ The session store should use atomic file replacement for manifests and results, 
 ### 5.1 Interactive Agent Session
 
 1. The user starts `doit` in a workspace.
-2. The CLI loads project instructions and local configuration.
+2. The CLI loads global `~/.doit` instructions, skills, and configuration, then project instructions, skills, and configuration; project values override matching global values.
 3. The user describes a development, review, or testing task.
 4. The agent gathers focused context and explains its next proposed action.
 5. The user approves or rejects requested tools when required.
@@ -531,11 +531,12 @@ The agent should use the repository's existing commands whenever possible. It sh
 Configuration should have predictable precedence:
 
 1. Built-in safe defaults.
-2. Project configuration, when supported.
-3. User configuration.
-4. Environment variables and command-line flags for explicit overrides.
+2. Global `~/.doit/config.json`, when present.
+3. Project `.doit/config.json`, when present; project profile fields override matching global fields.
+4. `DOIT_*` environment variables.
+5. Command-line flags for explicit overrides.
 
-Configuration should cover the workspace path, backend profile, model identifier, approval policy, repository task allowlist, timeouts, output limits, and session storage. Repository tasks are named entries with an executable, argument array, and optional environment allowlist; they are the only process actions exposed to the model. Session configuration should contain:
+Configuration should cover the workspace path, backend profile, model identifier, per-profile token budgets, automatic context policy, tool capability profile, approval policy, repository task allowlist, timeouts, output limits, and session storage. Repository tasks are named entries with an executable, argument array, and optional environment allowlist; they are the only process actions exposed to the model. Per-profile `token` values override the global token budget, while `context` controls automatic guidance, Git status, and workspace listing inclusion. Explicit file paths and tool results remain separate from automatic context policy; `tool_profile` controls model-visible capabilities. Session configuration should contain:
 
 - Whether persistence is durable or ephemeral for the current invocation.
 - Retention and pruning settings for `.doit/sessions/`.
