@@ -1,8 +1,10 @@
 package modelhttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,6 +72,49 @@ func TestClientSendsConfiguredRequestParameters(t *testing.T) {
 	}
 	if _, err := client.Create(context.Background(), model.Request{Model: "test-model"}); err != nil {
 		t.Fatalf("create parameterized response: %v", err)
+	}
+}
+
+func TestClientDebugTraceLogsBodiesWithoutAuthorizationHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer private-api-key" {
+			http.Error(writer, "authorization missing", http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"debug-response","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+	var trace bytes.Buffer
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{APIKey: "private-api-key", TokenCounter: usage.ByteEstimator{}, DebugLogger: slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatalf("new debug client: %v", err)
+	}
+	if _, err := client.Create(context.Background(), model.Request{Model: "test-model", Input: []model.InputItem{{Type: "message", Role: "user", Content: "trace-prompt-marker"}}}); err != nil {
+		t.Fatalf("create debug request: %v", err)
+	}
+	if !strings.Contains(trace.String(), "raw_model_request") || !strings.Contains(trace.String(), "trace-prompt-marker") || !strings.Contains(trace.String(), "raw_model_response") || strings.Contains(trace.String(), "private-api-key") {
+		t.Fatalf("debug trace did not safely capture raw bodies: %s", trace.String())
+	}
+}
+
+func TestClientDebugTraceLogsRawStreamFrames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"stream-marker\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"trace-stream\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+	var trace bytes.Buffer
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}, DebugLogger: slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatalf("new debug stream client: %v", err)
+	}
+	if _, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, nil); err != nil {
+		t.Fatalf("create debug stream: %v", err)
+	}
+	if !strings.Contains(trace.String(), "raw_model_stream_event") || !strings.Contains(trace.String(), "stream-marker") || !strings.Contains(trace.String(), "response.completed") {
+		t.Fatalf("debug trace did not capture raw stream frames: %s", trace.String())
 	}
 }
 

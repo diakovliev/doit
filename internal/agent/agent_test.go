@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -320,6 +322,9 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "read README", Workspace: root, Model: "test-model"})
 	assertCompletedMetricOutcome(t, outcome, err)
 	assertStepMetrics(t, outcome.Steps)
+	if outcome.Steps[0].ToolCalls != 1 || outcome.Steps[0].ToolLatency <= 0 || outcome.StepSummary.ToolCalls != 1 {
+		t.Fatalf("tool latency was not included in its model step: %+v summary=%+v", outcome.Steps[0], outcome.StepSummary)
+	}
 	assertNonStreamingStepSummary(t, outcome.StepSummary)
 	record, err := store.Load(context.Background(), outcome.SessionID)
 	if err != nil || len(record.Events) < 3 || record.Result == nil {
@@ -327,6 +332,20 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	}
 	assertPersistedStepMetrics(t, record.Result, outcome)
 	assertStepMetricEvents(t, record.Events, len(outcome.Steps))
+}
+
+func TestRunnerDebugLogsToolCallsAndResults(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunner(t, root)
+	defer func() { _ = store.Close() }()
+	var trace bytes.Buffer
+	runner.DebugLogger = slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if _, err := runner.Run(context.Background(), Task{Command: "run", Request: "read README", Workspace: root, Model: "test-model"}); err != nil {
+		t.Fatalf("run debug trace task: %v", err)
+	}
+	if !strings.Contains(trace.String(), "raw_tool_call") || !strings.Contains(trace.String(), "raw_tool_result") || !strings.Contains(trace.String(), "fs.read") {
+		t.Fatalf("debug trace did not include raw tool events: %s", trace.String())
+	}
 }
 
 func assertCompletedMetricOutcome(t *testing.T, outcome Outcome, err error) {

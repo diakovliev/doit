@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -30,6 +32,7 @@ type Invocation struct {
 	NoColor        bool
 	Quiet          bool
 	Verbose        bool
+	Debug          bool
 }
 
 // Handler executes parsed commands. The foundation leaves model execution
@@ -56,6 +59,7 @@ var booleanOptionHandlers = map[string]func(*Invocation){
 	"--no-color":    func(invocation *Invocation) { invocation.NoColor = true },
 	"--quiet":       func(invocation *Invocation) { invocation.Quiet = true },
 	"--verbose":     func(invocation *Invocation) { invocation.Verbose = true },
+	"--debug":       func(invocation *Invocation) { invocation.Debug = true },
 }
 
 var valueOptionNames = map[string]struct{}{
@@ -105,7 +109,8 @@ func (application Application) Execute(args []string, stdin io.Reader, stdout, s
 		return ExitCode(executeErr)
 	}
 
-	ctx := context.Background()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignals()
 	if invocation.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, invocation.Timeout)
@@ -322,7 +327,8 @@ func writeHelp(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "Usage: doit [global options] <command> [command options] [arguments]")
 	_, _ = fmt.Fprintln(writer, "")
 	_, _ = fmt.Fprintln(writer, "Commands: init, agent, run, develop, review, test, status, model, config, session, doctor, version")
-	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --thinking-effort; --global; --format; --ephemeral; --new-session; --timeout")
+	_, _ = fmt.Fprintln(writer, "Global options: -C, --directory; -p, --profile; -m, --model; --thinking-effort; --debug; --global; --format; --ephemeral; --new-session; --timeout")
+	_, _ = fmt.Fprintln(writer, "--debug writes raw model and tool payloads to stderr; prompts and tool data may be sensitive.")
 }
 
 type unavailableHandler struct{}

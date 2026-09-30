@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -34,6 +35,7 @@ type Options struct {
 	APIKey       string
 	RateLimit    *RateLimitPolicy
 	OnRetry      func(attempt int, delay time.Duration)
+	DebugLogger  *slog.Logger
 }
 
 // RateLimitPolicy bounds retries and pacing after provider throttling.
@@ -59,6 +61,7 @@ type Client struct {
 	requestTimes      []time.Time
 	tokenReservations []tokenReservation
 	onRetry           func(int, time.Duration)
+	debugLogger       *slog.Logger
 }
 
 type tokenReservation struct {
@@ -94,7 +97,7 @@ func New(profile config.BackendProfile, options Options) (*Client, error) {
 	if options.RateLimit != nil {
 		rateLimit = normalizeRateLimit(*options.RateLimit)
 	}
-	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, requestParameters: profile.RequestParameters, rateLimit: rateLimit, onRetry: options.OnRetry}, nil
+	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, requestParameters: profile.RequestParameters, rateLimit: rateLimit, onRetry: options.OnRetry, debugLogger: options.DebugLogger}, nil
 }
 
 // Create implements model.ModelClient using POST {api_root}/responses.
@@ -285,6 +288,7 @@ func (client *Client) processStreamData(dataLines []string, onEvent func(model.S
 	if data == "[DONE]" {
 		return nil
 	}
+	client.debug("raw_model_stream_event", slog.String("data", data))
 	var event streamEvent
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
@@ -420,6 +424,7 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 	for name, value := range client.profile.Headers {
 		httpRequest.Header.Set(name, value)
 	}
+	client.debug("raw_model_request", slog.String("request_id", clientRequestID), slog.String("body", string(body)))
 	httpResponse, err := client.httpClient.Do(httpRequest)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -432,7 +437,14 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 	if err != nil {
 		return httpResult{}, apperr.Wrap(apperr.KindBackend, "modelhttp.read", err)
 	}
+	client.debug("raw_model_response", slog.String("request_id", clientRequestID), slog.Int("status", httpResponse.StatusCode), slog.String("body", string(responseBody)))
 	return httpResult{statusCode: httpResponse.StatusCode, headers: httpResponse.Header, body: responseBody, clientRequestID: clientRequestID}, nil
+}
+
+func (client *Client) debug(message string, attributes ...slog.Attr) {
+	if client.debugLogger != nil {
+		client.debugLogger.LogAttrs(context.Background(), slog.LevelDebug, message, attributes...)
+	}
 }
 
 func defaultRateLimit(configuration config.RateLimitConfig) RateLimitPolicy {

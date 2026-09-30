@@ -22,6 +22,7 @@ import (
 	"github.com/diakovliev/doit/internal/processrunner"
 	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
+	"github.com/diakovliev/doit/internal/ui"
 	"github.com/diakovliev/doit/internal/usage"
 	"github.com/diakovliev/doit/internal/workspacefs"
 )
@@ -47,11 +48,15 @@ func TestRunCompletesAgainstDeterministicResponsesBackend(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	status := cli.RunWithHandler([]string{"-C", workspace, "run", "explain", "this", "repository"}, strings.NewReader(""), &stdout, &stderr, Handler{})
+	var debugOutput bytes.Buffer
+	status := cli.RunWithHandler([]string{"--debug", "-C", workspace, "run", "explain", "this", "repository"}, strings.NewReader(""), &stdout, &stderr, Handler{DebugWriter: &debugOutput})
 	if status != 0 {
 		t.Fatalf("expected successful CLI run, status=%d stderr=%q", status, stderr.String())
 	}
 	assertMetricCLIOutput(t, stdout.String())
+	if strings.Contains(stdout.String(), "raw_model_request") || !strings.Contains(debugOutput.String(), "raw_model_request") || !strings.Contains(debugOutput.String(), "raw_model_response") {
+		t.Fatalf("debug output was not isolated to stderr writer: stdout=%q debug=%q", stdout.String(), debugOutput.String())
+	}
 }
 
 func assertMetricCLIOutput(t *testing.T, output string) {
@@ -63,22 +68,6 @@ func assertMetricCLIOutput(t *testing.T, output string) {
 	}
 }
 
-func TestProgressLineReplacesTerminalStatus(t *testing.T) {
-	var output bytes.Buffer
-	line := &progressLine{writer: &output, enabled: true, replace: true}
-	line.Update(agent.ProgressEvent{Phase: "session", Message: "session started"})
-	line.Update(agent.ProgressEvent{Phase: "metrics", Message: "step=1 context=1200 generation_tps=unknown request_tps=2.50"})
-	line.Update(agent.ProgressEvent{Phase: "model", Message: "first action"})
-	line.Update(agent.ProgressEvent{Phase: "tool", Message: "second action"})
-	line.Clear()
-
-	for _, expected := range []string{"[doit] metrics: step=1 context=1200", "[doit] model: first action", "[doit] tool: second action", "\x1b[1A\r\x1b[2K[doit] metrics:"} {
-		if !strings.Contains(output.String(), expected) {
-			t.Fatalf("expected metrics-above-status progress display containing %q: %q", expected, output.String())
-		}
-	}
-}
-
 func TestWriteOutcomeShowsOnlyAverageMetrics(t *testing.T) {
 	rate := 20.0
 	outcome := agent.Outcome{SessionID: "session-1", Text: "finished", Steps: []usage.StepMetrics{{Round: 1, ContextTokens: 100, OutputTokens: 20, RequestWallClockTokensPerSecond: 5, OutputTokensPerSecond: &rate}}, StepSummary: usage.SummarizeSteps([]usage.StepMetrics{{ContextTokens: 100, OutputTokens: 20, RequestWallClockTokensPerSecond: 5, OutputTokensPerSecond: &rate}})}
@@ -86,14 +75,14 @@ func TestWriteOutcomeShowsOnlyAverageMetrics(t *testing.T) {
 	if err := writeOutcome(&output, "human", outcome); err != nil {
 		t.Fatalf("write human outcome: %v", err)
 	}
-	if !strings.Contains(output.String(), "average_metrics steps=1 context_tokens_per_step=100 generation_tokens_per_second=20.00") || strings.Contains(output.String(), "step=1 context_tokens=") {
+	if !strings.Contains(output.String(), "average_metrics steps=1 context_tokens_per_step=100 tool_calls=0 tool_latency_ms_per_step=0.00 generation_tokens_per_second=20.00") || strings.Contains(output.String(), "step=1 context_tokens=") {
 		t.Fatalf("expected only average metrics in final output: %s", output.String())
 	}
 }
 
 func TestProgressLineKeepsCapturedOutputLineOriented(t *testing.T) {
 	var output bytes.Buffer
-	line := newProgressLine(&output, true)
+	line := ui.NewProgressLine(&output, true)
 	line.Update(agent.ProgressEvent{Phase: "model", Message: "captured action"})
 
 	if output.String() != "[doit] model: captured action\n" {
@@ -128,7 +117,7 @@ func TestWriteMarkdownSession(t *testing.T) {
 	if err := writeMarkdownSession(&output, record); err != nil {
 		t.Fatalf("write markdown session: %v", err)
 	}
-	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| # | Time | Type | Status | Tool calls | Text |", "| 1 |", "completed", "| 0 | done |", "## Full Text", "<summary>Event #1 (model_message)</summary>", "<pre>done</pre>", "## Result", "### Summary", "- detail", "Context tokens across model rounds:** 1200", "### Model Steps", "| Step | Context | Provider input | Output | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |", "| 1 | 1200 `local-estimate` | 1100 | 200 | `provider` | 200.00 | 1000 ms | 100.00 | 2000 ms |", "### Average Metrics", "Context tokens per step: 1200", "Generation tokens/sec: 200.00 across 1 streamed step(s)", "Request-wall tokens/sec: 100.00", "### Changed Paths", "- `README.md`"} {
+	for _, expected := range []string{"# Session `session-1`", "| Status | `completed` |", "## Events", "| # | Time | Type | Status | Tool calls | Text |", "| 1 |", "completed", "| 0 | done |", "## Full Text", "<summary>Event #1 (model_message)</summary>", "<pre>done</pre>", "## Result", "### Summary", "- detail", "Context tokens across model rounds:** 1200", "### Model Steps", "| Step | Context | Provider input | Output | Tools | Tool latency | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |", "| 1 | 1200 `local-estimate` | 1100 | 200 | 0 | 0s | `provider` | 200.00 | 1000 ms | 100.00 | 2000 ms |", "### Average Metrics", "Context tokens per step: 1200", "Tool calls: 0; tool latency per step: 0.00 ms", "Generation tokens/sec: 200.00 across 1 streamed step(s)", "Request-wall tokens/sec: 100.00", "### Changed Paths", "- `README.md`"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("markdown session output missing %q: %s", expected, output.String())
 		}

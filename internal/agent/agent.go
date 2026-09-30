@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -78,16 +79,17 @@ type Outcome struct {
 
 // Runner coordinates one task.
 type Runner struct {
-	Client    model.ModelClient
-	Context   *contextdata.Builder
-	Tools     *tools.Registry
-	Policy    policy.ApprovalPolicy
-	Sessions  session.Store
-	Approve   ApprovalFunc
-	MaxRounds int
-	Progress  ProgressFunc
-	Streaming bool
-	Verbose   bool
+	Client      model.ModelClient
+	Context     *contextdata.Builder
+	Tools       *tools.Registry
+	Policy      policy.ApprovalPolicy
+	Sessions    session.Store
+	Approve     ApprovalFunc
+	MaxRounds   int
+	Progress    ProgressFunc
+	DebugLogger *slog.Logger
+	Streaming   bool
+	Verbose     bool
 }
 
 // Run executes a model/tool loop and persists its lifecycle events.
@@ -192,8 +194,16 @@ func (runner *Runner) processRound(ctx context.Context, state *loopState, reques
 	if err != nil || done {
 		return outcome, done, err
 	}
-	if err := runner.handleToolCalls(ctx, state.sessionID, request, response.ToolCalls, &state.changedPaths, &state.changeSets, &state.validations, nonInteractive, workspaceAutomation); err != nil {
-		return Outcome{SessionID: state.sessionID, Usage: state.totalUsage}, false, runner.failSession(ctx, state.sessionID, err)
+	step := &state.steps[len(state.steps)-1]
+	toolErr := runner.handleToolCalls(ctx, state.sessionID, request, response.ToolCalls, step, &state.changedPaths, &state.changeSets, &state.validations, nonInteractive, workspaceAutomation)
+	if step.ToolCalls > 0 {
+		if err := runner.appendEvent(ctx, state.sessionID, "step_tool_metrics", step); err != nil {
+			return Outcome{SessionID: state.sessionID, Usage: state.totalUsage}, false, err
+		}
+		runner.emit(ProgressEvent{Phase: "metrics", Message: stepMetricsMessage(*step), Round: round + 1})
+	}
+	if toolErr != nil {
+		return Outcome{SessionID: state.sessionID, Usage: state.totalUsage}, false, runner.failSession(ctx, state.sessionID, toolErr)
 	}
 	return outcome, false, nil
 }
@@ -283,7 +293,7 @@ func cloneTokenCount(value *int64) *int64 {
 }
 
 func stepMetricsMessage(metrics usage.StepMetrics) string {
-	return fmt.Sprintf("step=%d context=%d tokens generation_tps=%s request_tps=%.2f output=%d", metrics.Round, metrics.ContextTokens, optionalRate(metrics.OutputTokensPerSecond), metrics.RequestWallClockTokensPerSecond, metrics.OutputTokens)
+	return fmt.Sprintf("step=%d context=%d tokens generation_tps=%s request_tps=%.2f output=%d tools=%d tool_latency=%s", metrics.Round, metrics.ContextTokens, optionalRate(metrics.OutputTokensPerSecond), metrics.RequestWallClockTokensPerSecond, metrics.OutputTokens, metrics.ToolCalls, metrics.ToolLatency.Round(time.Microsecond))
 }
 
 func optionalRate(value *float64) string {
@@ -580,27 +590,31 @@ func sanitizeHistory(history []model.InputItem) []model.InputItem {
 	return result
 }
 
-func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	for _, call := range calls {
-		if err := runner.handleToolCall(ctx, sessionID, request, call, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation); err != nil {
+		if err := runner.handleToolCall(ctx, sessionID, request, call, step, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+	if step != nil {
+		step.ToolCalls++
+	}
+	runner.traceToolCall(call)
 	if call.Name == thinkingEffortToolName {
-		return runner.handleThinkingEffortCall(ctx, sessionID, request, call)
+		return runner.handleThinkingEffortCall(ctx, sessionID, request, call, step)
 	}
 	tool, exists := runner.Tools.Lookup(call.Name)
 	if !exists {
 		return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
 	}
-	return runner.handleRegisteredToolCall(ctx, sessionID, request, call, tool, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation)
+	return runner.handleRegisteredToolCall(ctx, sessionID, request, call, tool, step, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation)
 }
 
-func (runner *Runner) handleRegisteredToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, tool tools.Tool, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleRegisteredToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, tool tools.Tool, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
 	decision, err := runner.toolDecision(ctx, tool.Definition(), call, nonInteractive, workspaceAutomation)
 	if err != nil {
@@ -609,6 +623,9 @@ func (runner *Runner) handleRegisteredToolCall(ctx context.Context, sessionID se
 	toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
 	if decision == policy.DecisionAllow {
 		toolResult = runner.executeRegisteredTool(ctx, sessionID, call, tool, workspaceAutomation, nonInteractive)
+		if step != nil {
+			step.ToolLatency += toolResult.Duration
+		}
 		runner.recordToolEvidence(call.Name, toolResult, changedPaths, changeSets, validations)
 	}
 	return runner.appendToolResult(ctx, sessionID, request, call, toolResult)
@@ -636,6 +653,7 @@ func (runner *Runner) recordToolEvidence(name string, result tools.Result, chang
 }
 
 func (runner *Runner) appendToolResult(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, toolResult tools.Result) error {
+	runner.traceToolResult(call, toolResult)
 	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 		return err
 	}
@@ -651,10 +669,32 @@ func (runner *Runner) appendToolResult(ctx context.Context, sessionID session.ID
 	return nil
 }
 
-func (runner *Runner) handleThinkingEffortCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall) error {
+func (runner *Runner) traceToolCall(call model.ToolCall) {
+	if runner.DebugLogger != nil {
+		runner.DebugLogger.Debug("raw_tool_call", slog.String("name", call.Name), slog.String("call_id", call.CallID), slog.String("arguments", call.Arguments))
+	}
+}
+
+func (runner *Runner) traceToolResult(call model.ToolCall, result tools.Result) {
+	if runner.DebugLogger == nil {
+		return
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		runner.DebugLogger.Debug("raw_tool_result_encode_error", slog.String("name", call.Name), slog.String("error", err.Error()))
+		return
+	}
+	runner.DebugLogger.Debug("raw_tool_result", slog.String("name", call.Name), slog.String("call_id", call.CallID), slog.String("result", string(encoded)))
+}
+
+func (runner *Runner) handleThinkingEffortCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, step *usage.StepMetrics) error {
+	started := time.Now()
 	var arguments struct {
 		Effort string `json:"effort"`
 		Reason string `json:"reason,omitempty"`
+	}
+	if step != nil {
+		step.ToolLatency += time.Since(started)
 	}
 	toolResult := tools.Result{Status: tools.StatusSucceeded, Data: map[string]string{"applies": "next model round"}}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil || !validThinkingEffort(arguments.Effort) {
@@ -663,6 +703,7 @@ func (runner *Runner) handleThinkingEffortCall(ctx context.Context, sessionID se
 		request.ThinkingEffort = arguments.Effort
 		toolResult.Data = map[string]string{"effort": arguments.Effort, "applies": "next model round"}
 	}
+	runner.traceToolResult(call, toolResult)
 	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 		return err
 	}

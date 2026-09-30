@@ -3,6 +3,7 @@ package contextbuilder_test
 import (
 	stdcontext "context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,87 @@ func TestBuilderIncludesInstructionsAndSelectedFileWithinBudget(t *testing.T) {
 	}
 	assertFreshGitStatus(t, request.Input)
 	assertGuidance(t, request.Instructions)
+}
+
+func TestBuilderStreamsContextEventsInRequestOrder(t *testing.T) {
+	root := t.TempDir()
+	writeGuidanceFixture(t, root)
+	filesystem, err := workspacefs.New(root)
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(func(stdcontext.Context) (string, error) {
+		return " M README.md", nil
+	})
+	events := collectContextEvents(t, builder, contextdata.Request{
+		UserInput:    "inspect README",
+		Instructions: "Caller instructions.",
+		History:      []model.InputItem{{Type: "message", Role: "assistant", Content: "recent turn"}},
+		Paths:        []string{"README.md"},
+		Tools:        []model.ToolDefinition{{Type: "function", Name: "session.history"}},
+	})
+	assertContextEventOrder(t, events)
+}
+
+func collectContextEvents(t *testing.T, builder *contextdata.Builder, request contextdata.Request) []contextdata.Event {
+	t.Helper()
+	var events []contextdata.Event
+	streamErr := builder.StreamEvents(stdcontext.Background(), request, func(event contextdata.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if streamErr != nil {
+		t.Fatalf("stream context events: %v", streamErr)
+	}
+	return events
+}
+
+func assertContextEventOrder(t *testing.T, events []contextdata.Event) {
+	t.Helper()
+	if len(events) < 6 || events[0].Input.Content != "recent turn" || events[1].Input.Content != "inspect README" || !strings.HasPrefix(events[2].Input.Content, "File: README.md") || !strings.Contains(events[3].Input.Content, "Current Git status") {
+		t.Fatalf("unexpected streamed input events: %+v", events)
+	}
+	if events[4].Kind != contextdata.EventInstructions || events[4].Instructions != "Caller instructions." {
+		t.Fatalf("caller instructions event out of order: %+v", events[4])
+	}
+	if !strings.Contains(events[5].Instructions, "Follow repository rules.") || !strings.Contains(events[len(events)-1].Instructions, "session.history") {
+		t.Fatalf("repository/session instruction events missing: %+v", events[5:])
+	}
+}
+
+func TestBuilderStreamEventsStopsWhenConsumerReturnsError(t *testing.T) {
+	filesystem, err := workspacefs.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{})
+	stop := errors.New("stop context stream")
+	count := 0
+	err = builder.StreamEvents(stdcontext.Background(), contextdata.Request{UserInput: "request"}, func(contextdata.Event) error {
+		count++
+		return stop
+	})
+	if !errors.Is(err, stop) || count != 1 {
+		t.Fatalf("context stream ignored consumer stop: count=%d error=%v", count, err)
+	}
+}
+
+func TestBuilderStreamEventsHonorsContextCancellation(t *testing.T) {
+	filesystem, err := workspacefs.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, usage.ByteEstimator{})
+	ctx, cancel := stdcontext.WithCancel(stdcontext.Background())
+	cancel()
+	count := 0
+	err = builder.StreamEvents(ctx, contextdata.Request{UserInput: "request"}, func(contextdata.Event) error {
+		count++
+		return nil
+	})
+	if !errors.Is(err, stdcontext.Canceled) || count != 0 {
+		t.Fatalf("context stream ignored cancellation: count=%d error=%v", count, err)
+	}
 }
 
 func TestBuilderLoadsGlobalGuidanceAndProjectOverridesAfterIt(t *testing.T) {

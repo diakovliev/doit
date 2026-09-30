@@ -172,7 +172,7 @@ The context builder creates bounded, relevant input for the model. It may combin
 - Existing documentation and project instructions.
 - Results from approved inspection or validation tools.
 
-Context selection should be explicit and inspectable. The builder must avoid sending secrets, unnecessarily large files, ignored artifacts, or unrelated repository content. It must enforce an input-token budget before a request is sent.
+Context selection should be explicit and inspectable. The builder emits typed context events incrementally for history, the current prompt, selected files, repository status/listing, and instruction chunks; request assembly consumes the stream while applying token priorities. The model request is materialized only at the provider boundary. The builder must avoid sending secrets, unnecessarily large files, ignored artifacts, or unrelated repository content and propagate cancellation through event production. It must enforce an input-token budget before a request is sent.
 
 When session history is trimmed to fit the input budget, function-call and function-call-output items must be removed as an atomic pair. Resumed history must discard orphaned or incomplete tool items before a provider request so the Responses API never receives a function output without its matching call.
 

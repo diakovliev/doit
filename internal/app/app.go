@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
@@ -30,35 +31,40 @@ import (
 	"github.com/diakovliev/doit/internal/projectinit"
 	"github.com/diakovliev/doit/internal/session"
 	"github.com/diakovliev/doit/internal/tools"
+	"github.com/diakovliev/doit/internal/ui"
 	"github.com/diakovliev/doit/internal/usage"
 	"github.com/diakovliev/doit/internal/workspacefs"
 )
 
 // Handler composes the production CLI runtime.
-type Handler struct{}
+type Handler struct {
+	RendererFactory ui.Factory
+	DebugWriter     io.Writer
+}
 
 // Run executes a one-shot request.
-func (Handler) Run(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
-	return Handler{}.execute(ctx, invocation, stdin, stdout)
+func (handler Handler) Run(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+	return handler.execute(ctx, invocation, stdin, stdout)
 }
 
 // Agent executes one request in agent mode. Interactive continuation is added
 // after the one-shot orchestration path is stable.
-func (Handler) Agent(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
-	return Handler{}.execute(ctx, invocation, stdin, stdout)
+func (handler Handler) Agent(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+	return handler.execute(ctx, invocation, stdin, stdout)
 }
 
-func (Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+func (handler Handler) execute(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
 	if invocation.Command == "init" {
 		return initializeProject(ctx, invocation, stdout)
 	}
-	if handled, localErr := runLocalCommand(ctx, invocation, stdin, stdout); handled {
+	debugLogger := handler.debugLogger(invocation.Debug)
+	if handled, localErr := runLocalCommand(ctx, invocation, stdin, stdout, debugLogger); handled {
 		return localErr
 	}
-	return Handler{}.runModelCommand(ctx, invocation, stdin, stdout)
+	return handler.runModelCommand(ctx, invocation, stdin, stdout)
 }
 
-func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+func (handler Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
 	input := bufio.NewReader(stdin)
 	request, err := requestText(invocation, input, stdout)
 	if err != nil {
@@ -68,10 +74,10 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
-	progressLine := newProgressLine(stdout, configuration.Format != "json")
-	defer progressLine.Close()
-	progress := progressLine.Update
-	dependencies, err := buildRuntime(configuration, progress)
+	renderer := handler.newRenderer(stdout, configuration.Format != "json")
+	defer renderer.Close()
+	progress := renderer.Update
+	dependencies, err := buildRuntime(configuration, progress, handler.debugLogger(invocation.Debug))
 	if err != nil {
 		return err
 	}
@@ -80,7 +86,7 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	contextPolicy := configuration.EffectiveContextPolicy(dependencies.profile)
 	if invocation.Command == "agent" && configuration.Format != "json" {
 		dependencies.runner.Approve = func(approvalContext context.Context, action policy.Action, call tools.Call) (bool, error) {
-			progressLine.Clear()
+			renderer.Clear()
 			return promptApproval(approvalContext, input, stdout, action, call)
 		}
 	}
@@ -88,98 +94,41 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 	if err != nil {
 		return err
 	}
-	progressLine.Clear()
+	renderer.Clear()
 	return writeOutcome(stdout, configuration.Format, outcome)
 }
 
-type progressLine struct {
-	writer      io.Writer
-	enabled     bool
-	replace     bool
-	metricsText string
-	statusText  string
-	rendered    bool
-}
-
-func newProgressLine(writer io.Writer, enabled bool) *progressLine {
-	return &progressLine{writer: writer, enabled: enabled, replace: enabled && isTerminalWriter(writer)}
-}
-
-func (line *progressLine) Update(event agent.ProgressEvent) {
-	if !line.enabled {
-		return
+func (handler Handler) newRenderer(writer io.Writer, enabled bool) ui.Renderer {
+	factory := handler.RendererFactory
+	if factory == nil {
+		factory = ui.NewProgressLine
 	}
-	text := fmt.Sprintf("[doit] %s: %s", event.Phase, event.Message)
-	if event.Phase == "metrics" {
-		line.metricsText = text
-		if line.replace {
-			line.renderMetricsLine()
-		} else {
-			_, _ = fmt.Fprintln(line.writer, text)
-		}
-		return
-	}
-	line.statusText = text
-	if !line.replace {
-		_, _ = fmt.Fprintln(line.writer, text)
-		return
-	}
-	line.renderStatusLine()
+	return factory(writer, enabled)
 }
 
-func (line *progressLine) Clear() {
-	if line.replace && line.rendered {
-		_, _ = fmt.Fprint(line.writer, "\r\x1b[2K\x1b[1A\r\x1b[2K\n")
-		line.rendered = false
+func (handler Handler) debugLogger(enabled bool) *slog.Logger {
+	if !enabled {
+		return nil
 	}
-}
-
-func (line *progressLine) Close() {
-	line.Clear()
-}
-
-func (line *progressLine) renderStatusLine() {
-	if !line.rendered {
-		if line.metricsText == "" {
-			line.metricsText = "[doit] metrics: waiting for first model step"
-		}
-		_, _ = fmt.Fprintf(line.writer, "%s\n%s", line.metricsText, line.statusText)
-		line.rendered = true
-		return
+	writer := handler.DebugWriter
+	if writer == nil {
+		writer = os.Stderr
 	}
-	_, _ = fmt.Fprintf(line.writer, "\r\x1b[2K%s", line.statusText)
+	return slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func (line *progressLine) renderMetricsLine() {
-	if !line.rendered {
-		line.statusText = "[doit] session: starting"
-		line.renderStatusLine()
-		return
-	}
-	_, _ = fmt.Fprintf(line.writer, "\x1b[1A\r\x1b[2K%s\n\r\x1b[2K%s", line.metricsText, line.statusText)
-}
-
-func isTerminalWriter(writer io.Writer) bool {
-	file, ok := writer.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func runLocalCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) (bool, error) {
+func runLocalCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer, debugLogger *slog.Logger) (bool, error) {
 	switch invocation.Command {
 	case "test":
 		return true, runConfiguredTest(ctx, invocation, stdout)
 	case "status":
 		return true, writeStatus(ctx, invocation, stdout)
 	case "model":
-		return true, testModel(ctx, invocation, stdout)
+		return true, testModel(ctx, invocation, stdout, debugLogger)
 	case "config":
 		return true, listConfig(invocation, stdout)
 	case "session":
-		return true, handleSessionCommand(ctx, invocation, stdin, stdout)
+		return true, handleSessionCommand(ctx, invocation, stdin, stdout, debugLogger)
 	case "doctor":
 		return true, runDoctor(ctx, invocation, stdout)
 	default:
@@ -292,7 +241,7 @@ type modelTestReport struct {
 	Usage             usage.Counts `json:"usage"`
 }
 
-func testModel(ctx context.Context, invocation cli.Invocation, stdout io.Writer) error {
+func testModel(ctx context.Context, invocation cli.Invocation, stdout io.Writer, debugLogger *slog.Logger) error {
 	if len(invocation.Arguments) > 0 && invocation.Arguments[0] != "test" {
 		return apperr.New(apperr.KindUsage, "app.model", "supported model command is: model test")
 	}
@@ -304,7 +253,7 @@ func testModel(ctx context.Context, invocation cli.Invocation, stdout io.Writer)
 	if err != nil {
 		return err
 	}
-	client, err := modelhttp.New(profile, modelhttp.Options{TokenCounter: usage.ByteEstimator{}})
+	client, err := modelhttp.New(profile, modelhttp.Options{TokenCounter: usage.ByteEstimator{}, DebugLogger: debugLogger})
 	if err != nil {
 		return err
 	}
@@ -339,13 +288,13 @@ func listConfig(invocation cli.Invocation, stdout io.Writer) error {
 	return err
 }
 
-func handleSessionCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+func handleSessionCommand(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer, debugLogger *slog.Logger) error {
 	command := "list"
 	if len(invocation.Arguments) > 0 {
 		command = invocation.Arguments[0]
 	}
 	if command == "resume" {
-		return resumeSession(ctx, invocation, stdin, stdout)
+		return resumeSession(ctx, invocation, stdin, stdout, debugLogger)
 	}
 	configuration, err := config.Load(config.LoadOptions{Workspace: invocation.Directory})
 	if err != nil {
@@ -462,7 +411,11 @@ func markdownEventFields(event session.Event) (status, toolCalls, text string) {
 		}
 	case "step_metrics":
 		if metrics, ok := sessionStepMetrics(event.Data); ok {
-			return "measured", "-", fmt.Sprintf("context %d; output %d; generation %s tokens/sec", metrics.ContextTokens, metrics.OutputTokens, optionalMetricRate(metrics.OutputTokensPerSecond))
+			return "measured", "-", fmt.Sprintf("context %d; output %d; tools %d; tool latency %s", metrics.ContextTokens, metrics.OutputTokens, metrics.ToolCalls, metrics.ToolLatency.Round(time.Microsecond))
+		}
+	case "step_tool_metrics":
+		if metrics, ok := sessionStepMetrics(event.Data); ok {
+			return "tools measured", "-", fmt.Sprintf("step %d; calls %d; latency %s", metrics.Round, metrics.ToolCalls, metrics.ToolLatency.Round(time.Microsecond))
 		}
 	}
 	return "-", "-", "-"
@@ -743,14 +696,14 @@ func writeStepSummary(writer io.Writer, summary usage.StepSummary, markdown bool
 	}
 	generationRate := optionalMetricRate(summary.AverageGenerationTokensPerSec)
 	if markdown {
-		_, err := fmt.Fprintf(writer, "### Average Metrics\n\n- Steps: %d\n- Context tokens per step: %.0f\n- Generation tokens/sec: %s across %d streamed step(s)\n- Request-wall tokens/sec: %.2f\n", summary.Steps, summary.AverageContextTokens, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
+		_, err := fmt.Fprintf(writer, "### Average Metrics\n\n- Steps: %d\n- Context tokens per step: %.0f\n- Tool calls: %d; tool latency per step: %.2f ms\n- Generation tokens/sec: %s across %d streamed step(s)\n- Request-wall tokens/sec: %.2f\n", summary.Steps, summary.AverageContextTokens, summary.ToolCalls, summary.AverageToolLatencyMs, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
 		return err
 	}
-	_, err := fmt.Fprintf(writer, "average_metrics steps=%d context_tokens_per_step=%.0f generation_tokens_per_second=%s generation_steps=%d request_wall_clock_tokens_per_second=%.2f\n", summary.Steps, summary.AverageContextTokens, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
+	_, err := fmt.Fprintf(writer, "average_metrics steps=%d context_tokens_per_step=%.0f tool_calls=%d tool_latency_ms_per_step=%.2f generation_tokens_per_second=%s generation_steps=%d request_wall_clock_tokens_per_second=%.2f\n", summary.Steps, summary.AverageContextTokens, summary.ToolCalls, summary.AverageToolLatencyMs, generationRate, summary.GenerationMeasuredSteps, summary.AverageRequestTokensPerSecond)
 	return err
 }
 
-func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer) error {
+func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Reader, stdout io.Writer, debugLogger *slog.Logger) error {
 	if len(invocation.Arguments) < 2 {
 		return apperr.New(apperr.KindUsage, "app.session", "resume requires a session id and request")
 	}
@@ -770,7 +723,7 @@ func resumeSession(ctx context.Context, invocation cli.Invocation, stdin io.Read
 			_, _ = fmt.Fprintf(stdout, "[doit] %s: %s\n", event.Phase, event.Message)
 		}
 	}
-	dependencies, err := buildRuntime(configuration, progress)
+	dependencies, err := buildRuntime(configuration, progress, debugLogger)
 	if err != nil {
 		return err
 	}
@@ -856,7 +809,7 @@ type runtimeTools struct {
 	close    func()
 }
 
-func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (runtimeDependencies, error) {
+func buildRuntime(configuration config.Config, progress agent.ProgressFunc, debugLogger *slog.Logger) (runtimeDependencies, error) {
 	profile, err := configuration.SelectedProfile()
 	if err != nil {
 		return runtimeDependencies{}, err
@@ -885,7 +838,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 		_ = sessionStore.Close()
 		return runtimeDependencies{}, err
 	}
-	modelClient, err := modelhttp.New(profile, modelhttp.Options{Timeout: executionDuration(configuration.Execution.RequestTimeoutMs), TokenCounter: usage.ByteEstimator{}, OnRetry: func(attempt int, delay time.Duration) {
+	modelClient, err := modelhttp.New(profile, modelhttp.Options{Timeout: executionDuration(configuration.Execution.RequestTimeoutMs), TokenCounter: usage.ByteEstimator{}, DebugLogger: debugLogger, OnRetry: func(attempt int, delay time.Duration) {
 		if progress != nil {
 			progress(agent.ProgressEvent{Phase: "rate-limit", Message: fmt.Sprintf("throttled; retry %d in %s", attempt, delay.Round(time.Millisecond))})
 		}
@@ -896,7 +849,7 @@ func buildRuntime(configuration config.Config, progress agent.ProgressFunc) (run
 		return runtimeDependencies{}, err
 	}
 	contextBuilder := contextdata.New(filesystem, usage.ByteEstimator{}).WithGitStatus(gitService.StatusSummary)
-	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: toolset.registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress, Streaming: profile.Streaming, Verbose: configuration.Verbose, MaxRounds: configuration.Execution.MaxRounds}
+	runner := agent.Runner{Client: modelClient, Context: contextBuilder, Tools: toolset.registry, Policy: policy.DefaultPolicy{}, Sessions: sessionStore, Progress: progress, DebugLogger: debugLogger, Streaming: profile.Streaming, Verbose: configuration.Verbose, MaxRounds: configuration.Execution.MaxRounds}
 	return runtimeDependencies{runner: runner, profile: profile, close: func() { _ = sessionStore.Close(); toolset.close() }}, nil
 }
 
@@ -1046,11 +999,11 @@ func writeSessionStepMetrics(writer io.Writer, steps []usage.StepMetrics, markdo
 		return nil
 	}
 	if markdown {
-		if _, err := fmt.Fprint(writer, "### Model Steps\n\n| Step | Context | Provider input | Output | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |\n| ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |\n"); err != nil {
+		if _, err := fmt.Fprint(writer, "### Model Steps\n\n| Step | Context | Provider input | Output | Tools | Tool latency | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |\n| ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |\n"); err != nil {
 			return err
 		}
 		for _, step := range steps {
-			if _, err := fmt.Fprintf(writer, "| %d | %d `%s` | %s | %d | `%s` | %s | %s | %.2f | %d ms |\n", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step)); err != nil {
+			if _, err := fmt.Fprintf(writer, "| %d | %d `%s` | %s | %d | %d | %s | `%s` | %s | %s | %.2f | %d ms |\n", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.ToolCalls, step.ToolLatency.Round(time.Microsecond), step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step)); err != nil {
 				return err
 			}
 		}
@@ -1066,7 +1019,7 @@ func writeSessionStepMetrics(writer io.Writer, steps []usage.StepMetrics, markdo
 }
 
 func agentStepMetricsMessage(step usage.StepMetrics) string {
-	return fmt.Sprintf("step=%d context_tokens=%d context_source=%s provider_input_tokens=%s output_tokens=%d output_source=%s generation_tokens_per_second=%s generation_duration_ms=%s request_wall_clock_tokens_per_second=%.2f request_duration_ms=%d", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step))
+	return fmt.Sprintf("step=%d context_tokens=%d context_source=%s provider_input_tokens=%s output_tokens=%d tool_calls=%d tool_latency=%s output_source=%s generation_tokens_per_second=%s generation_duration_ms=%s request_wall_clock_tokens_per_second=%.2f request_duration_ms=%d", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.ToolCalls, step.ToolLatency.Round(time.Microsecond), step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step))
 }
 
 func generationRate(step usage.StepMetrics) *float64 {

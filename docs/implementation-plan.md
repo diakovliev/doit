@@ -232,10 +232,25 @@ Cloud synchronization, hosted analytics, and cloud persistence are explicitly ou
 | `MODEL-004` | Add configurable and request-level model thinking effort. | `MODEL-003`, `CLI-001` | Profiles and CLI invocations select a provider reasoning effort; request-level effort overrides configured reasoning effort while preserving other reasoning fields, and embedding callers can change it between model rounds. | `DONE` |
 | `MODEL-005` | Allow bounded model-directed effort escalation. | `MODEL-004` | The model can request `low`, `medium`, or `high` effort for the next round through a read-only control tool; invalid values are rejected and the configured baseline is restored afterward. | `DONE` |
 
+## Phase 10: Future Improvements
+
+| ID | Work item | Depends on | Done when | Status |
+| --- | --- | --- | --- | --- |
+| `UI-001` | Extract terminal progress rendering into `internal/ui`. | `CLI-001` | The app injects a renderer interface/factory, terminal rendering is outside orchestration, and focused UI tests cover terminal and captured output. | `DONE` |
+| `DEBUG-001` | Add opt-in raw model and tool tracing. | `MODEL-002`, `HARD-002` | `--debug` writes request/response/stream/tool traces to stderr without logging credentials or changing normal output; structured logging remains optional. | `DONE` |
+| `TERM-001` | Handle terminal resize and recover terminal state. | `UI-001` | Resize notifications safely redraw bounded progress rows; cancellation and shutdown restore renderer state without leaving cursor/color modes changed. | `DONE` |
+| `PERF-001` | Add tool latency to per-step metrics. | `MODEL-006`, `TOOL-008` | Per-step summaries distinguish tool latency from model request/generation timing and retain it in session output. | `DONE` |
+| `CONTEXT-004` | Stream context assembly as bounded events. | `CONTEXT-003`, `SESSION-004` | Context sources yield typed events incrementally; budget selection consumes the stream under cancellation and bounded-memory tests without building unbounded intermediate strings. | `DONE` |
+
 ## Progress Log
 
 | Date | Task ID | Change | Evidence |
 | --- | --- | --- | --- |
+| 2026-09-30 | `UI-001` | Completed renderer interface/factory injection and moved replaceable metrics/status rendering and tests into `internal/ui`. | Full repository gates passed; Windows cross-build passed |
+| 2026-09-30 | `DEBUG-001` | Added opt-in JSONL traces for raw model requests/responses, SSE frames, and tool calls/results to stderr; authorization headers are never logged and normal stdout is unchanged. | Full repository gates passed |
+| 2026-09-30 | `TERM-001` | Added Unix resize notifications, dynamic line-width truncation/redraw, Ctrl-C cancellation, and renderer cleanup without changing cursor/color modes. | Full repository gates and Windows cross-build passed |
+| 2026-09-30 | `PERF-001` | Added per-model-step tool-call counts and accumulated execution latency to progress, final averages, and persisted session metrics. | Full repository gates passed |
+| 2026-09-30 | `CONTEXT-004` | Added cancellable typed context events for history, prompts, selected files, workspace state, and instructions; `Build` consumes the stream before token-priority fitting. | Full repository gates passed |
 | 2026-09-12 | `PLAN-001` | Created the initial trackable implementation plan from the project design. | This document |
 | 2026-09-12 | `DEC-001`-`DEC-009` | Frozen the Safe Local MVP compatibility, configuration, contracts, tool schemas, approvals, token accounting, Git scope, platform, and fake-backend decisions. | [Phase 0 Decision Record](#phase-0-decision-record); [design open decisions](design.md#11-open-decisions) |
 | 2026-09-12 | `FOUND-001`-`FOUND-006` | Implemented the Phase 1 Foundation packages, CLI shell, configuration loader, tool and policy contracts, fake clients, session contracts, and token accounting. | Repository validation matrix |

@@ -80,14 +80,41 @@ type Policy struct {
 	IncludeWorkspaceListing bool
 }
 
+// EventKind identifies one incremental context contribution.
+type EventKind string
+
+const (
+	EventInput        EventKind = "input"
+	EventInstructions EventKind = "instructions"
+)
+
+// Event contains one input item or one instruction chunk emitted by StreamEvents.
+type Event struct {
+	Kind         EventKind
+	Input        model.InputItem
+	Instructions string
+}
+
 // Build returns a token-bounded normalized model request and its input usage.
 func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Request, usage.Counts, error) {
 	if err := builder.validateRequest(request); err != nil {
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, err
 	}
-	input, policy := builder.buildInput(ctx, request)
-	instructions := builder.buildInstructions(ctx, request.Instructions, request.Tools, policy.IncludeGuidance)
-	normalized := model.Request{Model: request.Model, ThinkingEffort: request.ThinkingEffort, Instructions: strings.TrimSpace(instructions), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
+	input := make([]model.InputItem, 0, len(request.History)+1+len(request.Paths)+2)
+	var instructionBuilder strings.Builder
+	streamErr := builder.StreamEvents(ctx, request, func(event Event) error {
+		switch event.Kind {
+		case EventInput:
+			input = append(input, event.Input)
+		case EventInstructions:
+			instructionBuilder.WriteString(event.Instructions)
+		}
+		return nil
+	})
+	if streamErr != nil {
+		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, streamErr
+	}
+	normalized := model.Request{Model: request.Model, ThinkingEffort: request.ThinkingEffort, Instructions: strings.TrimSpace(instructionBuilder.String()), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
 	budget := request.MaxInputTokens
 	if budget <= 0 {
 		budget = defaultInputTokenBudget
@@ -99,6 +126,133 @@ func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Re
 	return normalized, counts, nil
 }
 
+// StreamEvents emits bounded context contributions in request order. The callback
+// controls consumption and may stop assembly by returning an error.
+func (builder *Builder) StreamEvents(ctx stdcontext.Context, request Request, yield func(Event) error) error {
+	if err := builder.validateRequest(request); err != nil {
+		return err
+	}
+	if yield == nil {
+		return errors.New("context event consumer is required")
+	}
+	policy := effectiveContextPolicy(request.Policy)
+	if err := builder.streamConversation(ctx, request, yield); err != nil {
+		return err
+	}
+	if err := builder.streamRepositoryContext(ctx, request, policy, yield); err != nil {
+		return err
+	}
+	return builder.streamInstructions(ctx, request, policy.IncludeGuidance, yield)
+}
+
+func (builder *Builder) streamConversation(ctx stdcontext.Context, request Request, yield func(Event) error) error {
+	if err := builder.streamHistory(ctx, request.History, yield); err != nil {
+		return err
+	}
+	return builder.emitEvent(ctx, yield, Event{Kind: EventInput, Input: model.InputItem{Type: "message", Role: "user", Content: request.UserInput, ContextPriority: model.ContextPriorityCurrent}})
+}
+
+func (builder *Builder) streamRepositoryContext(ctx stdcontext.Context, request Request, policy *Policy, yield func(Event) error) error {
+	if err := builder.streamSelectedPaths(ctx, request.Paths, yield); err != nil {
+		return err
+	}
+	if policy.IncludeGitStatus {
+		if err := builder.streamGitStatus(ctx, yield); err != nil {
+			return err
+		}
+	}
+	if policy.IncludeWorkspaceListing && len(request.Paths) == 0 {
+		if err := builder.streamWorkspaceListing(ctx, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func effectiveContextPolicy(policy *Policy) *Policy {
+	if policy != nil {
+		return policy
+	}
+	return &Policy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
+}
+
+func (builder *Builder) streamHistory(ctx stdcontext.Context, history []model.InputItem, yield func(Event) error) error {
+	for _, item := range history {
+		if item.ContextPriority != model.ContextPriorityMemory && item.ContextPriority != model.ContextPriorityRollingMemory {
+			item.ContextPriority = model.ContextPriorityRecent
+		}
+		if strings.HasPrefix(item.Content, rollingMemoryPrefix) {
+			item.ContextPriority = model.ContextPriorityMemory
+		}
+		if err := builder.emitEvent(ctx, yield, Event{Kind: EventInput, Input: item}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (builder *Builder) streamSelectedPaths(ctx stdcontext.Context, paths []string, yield func(Event) error) error {
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
+		if err != nil {
+			continue
+		}
+		item := model.InputItem{Type: "message", Role: "user", Content: "File: " + readResponse.Path + "\n" + readResponse.Content, ContextPriority: model.ContextPrioritySelected}
+		if err := builder.emitEvent(ctx, yield, Event{Kind: EventInput, Input: item}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (builder *Builder) streamGitStatus(ctx stdcontext.Context, yield func(Event) error) error {
+	input := builder.appendGitStatus(ctx, nil)
+	if len(input) == 0 {
+		return nil
+	}
+	return builder.emitEvent(ctx, yield, Event{Kind: EventInput, Input: input[0]})
+}
+
+func (builder *Builder) streamWorkspaceListing(ctx stdcontext.Context, yield func(Event) error) error {
+	input := builder.appendWorkspaceListing(ctx, nil, true)
+	if len(input) == 0 {
+		return nil
+	}
+	return builder.emitEvent(ctx, yield, Event{Kind: EventInput, Input: input[0]})
+}
+
+func (builder *Builder) streamInstructions(ctx stdcontext.Context, request Request, includeGuidance bool, yield func(Event) error) error {
+	if request.Instructions != "" {
+		if err := builder.emitEvent(ctx, yield, Event{Kind: EventInstructions, Instructions: request.Instructions}); err != nil {
+			return err
+		}
+	}
+	if includeGuidance {
+		if err := builder.emitEvent(ctx, yield, Event{Kind: EventInstructions, Instructions: "\n" + builder.projectInstructions(ctx)}); err != nil {
+			return err
+		}
+	}
+	if hasToolWorkflow(request.Tools) {
+		if err := builder.emitEvent(ctx, yield, Event{Kind: EventInstructions, Instructions: "\n\n" + toolWorkflowGuidance}); err != nil {
+			return err
+		}
+	}
+	if hasTool(request.Tools, "session.history") {
+		return builder.emitEvent(ctx, yield, Event{Kind: EventInstructions, Instructions: "\n\n" + sessionHistoryGuidance})
+	}
+	return nil
+}
+
+func (builder *Builder) emitEvent(ctx stdcontext.Context, yield func(Event) error, event Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return yield(event)
+}
+
 func (builder *Builder) validateRequest(request Request) error {
 	if builder == nil || builder.filesystem == nil {
 		return errors.New("context builder filesystem is required")
@@ -107,53 +261,6 @@ func (builder *Builder) validateRequest(request Request) error {
 		return errors.New("context request is empty")
 	}
 	return nil
-}
-
-func (builder *Builder) buildInput(ctx stdcontext.Context, request Request) ([]model.InputItem, *Policy) {
-	input := append([]model.InputItem(nil), request.History...)
-	for index := range input {
-		if strings.HasPrefix(input[index].Content, rollingMemoryPrefix) {
-			input[index].ContextPriority = model.ContextPriorityMemory
-		} else if input[index].ContextPriority != model.ContextPriorityMemory && input[index].ContextPriority != model.ContextPriorityRollingMemory {
-			input[index].ContextPriority = model.ContextPriorityRecent
-		}
-	}
-	policy := request.Policy
-	if policy == nil {
-		policy = &Policy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
-	}
-	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput, ContextPriority: model.ContextPriorityCurrent})
-	input = builder.appendExplicitPaths(ctx, input, request.Paths)
-	if policy.IncludeGitStatus {
-		input = builder.appendGitStatus(ctx, input)
-	}
-	if policy.IncludeWorkspaceListing {
-		input = builder.appendWorkspaceListing(ctx, input, len(request.Paths) == 0)
-	}
-	return input, policy
-}
-
-func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions string, definitions []model.ToolDefinition, includeGuidance bool) string {
-	if includeGuidance {
-		instructions += "\n" + builder.projectInstructions(ctx)
-	}
-	if hasToolWorkflow(definitions) {
-		instructions += "\n\n" + toolWorkflowGuidance
-	}
-	if hasTool(definitions, "session.history") {
-		instructions += "\n\n" + sessionHistoryGuidance
-	}
-	return strings.TrimSpace(instructions)
-}
-
-func (builder *Builder) appendExplicitPaths(ctx stdcontext.Context, input []model.InputItem, paths []string) []model.InputItem {
-	for _, path := range paths {
-		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
-		if err == nil {
-			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "File: " + readResponse.Path + "\n" + readResponse.Content, ContextPriority: model.ContextPrioritySelected})
-		}
-	}
-	return input
 }
 
 func (builder *Builder) appendWorkspaceListing(ctx stdcontext.Context, input []model.InputItem, include bool) []model.InputItem {
