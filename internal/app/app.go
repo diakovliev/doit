@@ -93,10 +93,12 @@ func (Handler) runModelCommand(ctx context.Context, invocation cli.Invocation, s
 }
 
 type progressLine struct {
-	writer  io.Writer
-	enabled bool
-	replace bool
-	width   int
+	writer      io.Writer
+	enabled     bool
+	replace     bool
+	metricsText string
+	statusText  string
+	rendered    bool
 }
 
 func newProgressLine(writer io.Writer, enabled bool) *progressLine {
@@ -107,19 +109,28 @@ func (line *progressLine) Update(event agent.ProgressEvent) {
 	if !line.enabled {
 		return
 	}
-	if !line.replace {
-		_, _ = fmt.Fprintf(line.writer, "[doit] %s: %s\n", event.Phase, event.Message)
+	text := fmt.Sprintf("[doit] %s: %s", event.Phase, event.Message)
+	if event.Phase == "metrics" {
+		line.metricsText = text
+		if line.replace {
+			line.renderMetricsLine()
+		} else {
+			_, _ = fmt.Fprintln(line.writer, text)
+		}
 		return
 	}
-	line.clearTerminalText()
-	text := fmt.Sprintf("[doit] %s: %s", event.Phase, event.Message)
-	_, _ = fmt.Fprint(line.writer, text)
-	line.width = len(text)
+	line.statusText = text
+	if !line.replace {
+		_, _ = fmt.Fprintln(line.writer, text)
+		return
+	}
+	line.renderStatusLine()
 }
 
 func (line *progressLine) Clear() {
-	if line.replace {
-		line.clearTerminalText()
+	if line.replace && line.rendered {
+		_, _ = fmt.Fprint(line.writer, "\r\x1b[2K\x1b[1A\r\x1b[2K\n")
+		line.rendered = false
 	}
 }
 
@@ -127,12 +138,25 @@ func (line *progressLine) Close() {
 	line.Clear()
 }
 
-func (line *progressLine) clearTerminalText() {
-	if line.width == 0 {
+func (line *progressLine) renderStatusLine() {
+	if !line.rendered {
+		if line.metricsText == "" {
+			line.metricsText = "[doit] metrics: waiting for first model step"
+		}
+		_, _ = fmt.Fprintf(line.writer, "%s\n%s", line.metricsText, line.statusText)
+		line.rendered = true
 		return
 	}
-	_, _ = fmt.Fprintf(line.writer, "\r%s\r", strings.Repeat(" ", line.width))
-	line.width = 0
+	_, _ = fmt.Fprintf(line.writer, "\r\x1b[2K%s", line.statusText)
+}
+
+func (line *progressLine) renderMetricsLine() {
+	if !line.rendered {
+		line.statusText = "[doit] session: starting"
+		line.renderStatusLine()
+		return
+	}
+	_, _ = fmt.Fprintf(line.writer, "\x1b[1A\r\x1b[2K%s\n\r\x1b[2K%s", line.metricsText, line.statusText)
 }
 
 func isTerminalWriter(writer io.Writer) bool {
@@ -1012,9 +1036,6 @@ func writeOutcome(writer io.Writer, format string, outcome agent.Outcome) error 
 		return err
 	}
 	if _, err := fmt.Fprintf(writer, "session=%s input_tokens=%s output_tokens=%s total_tokens=%s source=%s exact=%t context_tokens_total=%d\n", outcome.SessionID, usageValue(outcome.Usage.InputTokens), usageValue(outcome.Usage.OutputTokens), usageValue(outcome.Usage.TotalTokens), outcome.Usage.Source, outcome.Usage.Exact, outcome.ContextTokensTotal); err != nil {
-		return err
-	}
-	if err := writeSessionStepMetrics(writer, outcome.Steps, false); err != nil {
 		return err
 	}
 	return writeStepSummary(writer, outcome.StepSummary, false)

@@ -66,12 +66,28 @@ func assertMetricCLIOutput(t *testing.T, output string) {
 func TestProgressLineReplacesTerminalStatus(t *testing.T) {
 	var output bytes.Buffer
 	line := &progressLine{writer: &output, enabled: true, replace: true}
+	line.Update(agent.ProgressEvent{Phase: "session", Message: "session started"})
+	line.Update(agent.ProgressEvent{Phase: "metrics", Message: "step=1 context=1200 generation_tps=unknown request_tps=2.50"})
 	line.Update(agent.ProgressEvent{Phase: "model", Message: "first action"})
 	line.Update(agent.ProgressEvent{Phase: "tool", Message: "second action"})
 	line.Clear()
 
-	if strings.Contains(output.String(), "\n") || !strings.Contains(output.String(), "\r[doit] tool: second action") {
-		t.Fatalf("expected one replaceable terminal status line: %q", output.String())
+	for _, expected := range []string{"[doit] metrics: step=1 context=1200", "[doit] model: first action", "[doit] tool: second action", "\x1b[1A\r\x1b[2K[doit] metrics:"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("expected metrics-above-status progress display containing %q: %q", expected, output.String())
+		}
+	}
+}
+
+func TestWriteOutcomeShowsOnlyAverageMetrics(t *testing.T) {
+	rate := 20.0
+	outcome := agent.Outcome{SessionID: "session-1", Text: "finished", Steps: []usage.StepMetrics{{Round: 1, ContextTokens: 100, OutputTokens: 20, RequestWallClockTokensPerSecond: 5, OutputTokensPerSecond: &rate}}, StepSummary: usage.SummarizeSteps([]usage.StepMetrics{{ContextTokens: 100, OutputTokens: 20, RequestWallClockTokensPerSecond: 5, OutputTokensPerSecond: &rate}})}
+	var output bytes.Buffer
+	if err := writeOutcome(&output, "human", outcome); err != nil {
+		t.Fatalf("write human outcome: %v", err)
+	}
+	if !strings.Contains(output.String(), "average_metrics steps=1 context_tokens_per_step=100 generation_tokens_per_second=20.00") || strings.Contains(output.String(), "step=1 context_tokens=") {
+		t.Fatalf("expected only average metrics in final output: %s", output.String())
 	}
 }
 
