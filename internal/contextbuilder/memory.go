@@ -186,7 +186,9 @@ func boundRollingLines(lines []string, maximum int) []string {
 
 func writeRollingLines(builder *strings.Builder, lines []string) {
 	for _, line := range lines {
-		builder.WriteString("- " + line + "\n")
+		builder.WriteString("- ")
+		builder.WriteString(line)
+		builder.WriteString("\n")
 	}
 }
 
