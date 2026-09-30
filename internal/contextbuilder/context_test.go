@@ -137,9 +137,12 @@ func writeGuidanceFixture(t *testing.T, root string) {
 
 func assertFreshGitStatus(t *testing.T, input []model.InputItem) {
 	t.Helper()
-	if !strings.Contains(input[1].Content, "Current Git status") {
-		t.Fatalf("expected fresh Git status in context: %+v", input)
+	for _, item := range input {
+		if strings.Contains(item.Content, "Current Git status") {
+			return
+		}
 	}
+	t.Fatalf("expected fresh Git status in context: %+v", input)
 }
 
 func TestBuilderTrimsFunctionCallsWithTheirOutputs(t *testing.T) {
@@ -163,6 +166,75 @@ func TestBuilderTrimsFunctionCallsWithTheirOutputs(t *testing.T) {
 	}
 }
 
+func TestBuilderDropsCompactMemoryBeforeRecentHistoryWhenBudgetIsTight(t *testing.T) {
+	filesystem, err := workspacefs.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	builder := contextdata.New(filesystem, itemCountCounter{})
+	request, _, err := builder.Build(stdcontext.Background(), contextdata.Request{
+		Model:     "test-model",
+		UserInput: "continue",
+		History: []model.InputItem{
+			{Type: "message", Role: "user", Content: "Compressed prior session memory. older details"},
+			{Type: "message", Role: "assistant", Content: "recent turn"},
+		},
+		MaxInputTokens: 2,
+	})
+	if err != nil {
+		t.Fatalf("build budgeted context: %v", err)
+	}
+	if len(request.Input) != 2 || request.Input[0].Content != "recent turn" || request.Input[1].Content != "continue" {
+		t.Fatalf("tight budget did not prefer recent exact context: %+v", request.Input)
+	}
+}
+
+func TestFitRequestDropsAutomaticContextAndMemoryBeforeRecentTurns(t *testing.T) {
+	builder := contextdata.New(nil, itemCountCounter{})
+	request := model.Request{Input: []model.InputItem{
+		{Type: "message", Role: "user", Content: "workspace listing", ContextPriority: model.ContextPriorityAutomatic},
+		{Type: "message", Role: "user", Content: "compressed memory", ContextPriority: model.ContextPriorityMemory},
+		{Type: "message", Role: "assistant", Content: "recent turn", ContextPriority: model.ContextPriorityRecent},
+		{Type: "message", Role: "user", Content: "current request", ContextPriority: model.ContextPriorityCurrent},
+	}}
+	if _, err := builder.FitRequest(stdcontext.Background(), &request, 2); err != nil {
+		t.Fatalf("fit ongoing request: %v", err)
+	}
+	if len(request.Input) != 2 || request.Input[0].Content != "recent turn" || request.Input[1].Content != "current request" {
+		t.Fatalf("ongoing fit did not retain newer exact turns: %+v", request.Input)
+	}
+}
+
+func TestFitRequestRollsTrimmedRecentTurnsIntoMemory(t *testing.T) {
+	builder := contextdata.New(nil, itemCountCounter{})
+	request := model.Request{Input: []model.InputItem{
+		{Type: "message", Role: "assistant", Content: "older response one", ContextPriority: model.ContextPriorityRecent},
+		{Type: "message", Role: "assistant", Content: "older response two", ContextPriority: model.ContextPriorityRecent},
+		{Type: "message", Role: "user", Content: "current request", ContextPriority: model.ContextPriorityCurrent},
+	}}
+	if _, err := builder.FitRequest(stdcontext.Background(), &request, 2); err != nil {
+		t.Fatalf("fit ongoing request: %v", err)
+	}
+	if len(request.Input) != 2 || !strings.HasPrefix(request.Input[0].Content, "Compressed prior session memory.") || !strings.Contains(request.Input[0].Content, "assistant: older response one") || !strings.Contains(request.Input[0].Content, "assistant: older response two") || request.Input[1].Content != "current request" {
+		t.Fatalf("trimmed turns were not rolled into retained memory: %+v", request.Input)
+	}
+}
+
+func TestFitRequestCarriesExactFactsFromTrimmedToolPair(t *testing.T) {
+	builder := contextdata.New(nil, itemCountCounter{})
+	request := model.Request{Input: []model.InputItem{
+		{Type: "function_call", CallID: "read-1", Name: "fs.read", Arguments: `{"path":"internal/app/app.go"}`, ContextPriority: model.ContextPriorityRecent},
+		{Type: "function_call_output", CallID: "read-1", Output: `{"status":"succeeded","data":{"changed_paths":["README.md"],"passed":true}}`, ContextPriority: model.ContextPriorityRecent},
+		{Type: "message", Role: "user", Content: "current request", ContextPriority: model.ContextPriorityCurrent},
+	}}
+	if _, err := builder.FitRequest(stdcontext.Background(), &request, 2); err != nil {
+		t.Fatalf("fit tool-result request: %v", err)
+	}
+	if len(request.Input) != 2 || !strings.Contains(request.Input[0].Content, `tool fs.read arguments = {"path":"internal/app/app.go"}`) || !strings.Contains(request.Input[0].Content, `changed_paths = ["README.md"]`) || !strings.Contains(request.Input[0].Content, "passed = true") {
+		t.Fatalf("trimmed tool facts were not preserved in memory: %+v", request.Input)
+	}
+}
+
 func TestBuilderExplainsBoundedSessionHistory(t *testing.T) {
 	root := t.TempDir()
 	filesystem, err := workspacefs.New(root)
@@ -179,7 +251,7 @@ func TestBuilderExplainsBoundedSessionHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build session history context: %v", err)
 	}
-	if !strings.Contains(request.Instructions, "session.history") || !strings.Contains(request.Instructions, "Do not assume omitted history") {
+	if !strings.Contains(request.Instructions, "session.history") || !strings.Contains(request.Instructions, "Do not treat summaries as exact evidence") {
 		t.Fatalf("bounded history guidance was not included: %s", request.Instructions)
 	}
 }

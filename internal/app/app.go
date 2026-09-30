@@ -427,23 +427,18 @@ func writeMarkdownEvents(writer io.Writer, events []session.Event) error {
 func markdownEventFields(event session.Event) (status, toolCalls, text string) {
 	switch event.Type {
 	case "request":
-		var request model.Request
-		if json.Unmarshal(event.Data, &request) == nil {
-			for index := len(request.Input) - 1; index >= 0; index-- {
-				if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
-					return "-", "-", publicSessionPreview(request.Input[index].Content)
-				}
-			}
-		}
+		return "-", "-", publicSessionPreview(sessionRequestPrompt(event.Data))
 	case "model_message":
-		var response model.Response
-		if json.Unmarshal(event.Data, &response) == nil {
+		if response, ok := sessionModelResponse(event.Data); ok {
 			return response.Status, strconv.Itoa(len(response.ToolCalls)), publicSessionPreview(response.Text)
 		}
 	case "tool_result":
-		var result tools.Result
-		if json.Unmarshal(event.Data, &result) == nil {
-			return string(result.Status), "-", "-"
+		if status, ok := sessionToolStatus(event.Data); ok {
+			return status, "-", "-"
+		}
+	case "step_metrics":
+		if metrics, ok := sessionStepMetrics(event.Data); ok {
+			return "measured", "-", fmt.Sprintf("context %d; output %d; generation %s tokens/sec", metrics.ContextTokens, metrics.OutputTokens, optionalMetricRate(metrics.OutputTokensPerSecond))
 		}
 	}
 	return "-", "-", "-"
@@ -497,7 +492,10 @@ func writeMarkdownResult(writer io.Writer, result *session.Result) error {
 		_, err := fmt.Fprintln(writer, "No result recorded.")
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "### Summary\n\n%s\n\n### Usage\n\n`%s`\n\n", strings.TrimSpace(result.Summary), markdownEscape(formatUsage(result.Usage))); err != nil {
+	if _, err := fmt.Fprintf(writer, "### Summary\n\n%s\n\n### Usage\n\n`%s`\n\n**Context tokens across model rounds:** %d\n\n", strings.TrimSpace(result.Summary), markdownEscape(formatUsage(result.Usage)), result.ContextTokensTotal); err != nil {
+		return err
+	}
+	if err := writeSessionStepMetrics(writer, result.Steps, true); err != nil {
 		return err
 	}
 	if err := writeMarkdownChangedPaths(writer, result.ChangedPaths); err != nil {
@@ -591,7 +589,10 @@ func writeSessionResult(writer io.Writer, result *session.Result) error {
 		_, err := fmt.Fprintln(writer, "result=none")
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "result=%s\nusage=%s\n", result.Summary, formatUsage(result.Usage)); err != nil {
+	if _, err := fmt.Fprintf(writer, "result=%s\nusage=%s\ncontext_tokens_total=%d\n", result.Summary, formatUsage(result.Usage), result.ContextTokensTotal); err != nil {
+		return err
+	}
+	if err := writeSessionStepMetrics(writer, result.Steps, false); err != nil {
 		return err
 	}
 	if len(result.ChangedPaths) > 0 {
@@ -610,26 +611,58 @@ func writeSessionResult(writer io.Writer, result *session.Result) error {
 func humanEventSummary(event session.Event) string {
 	switch event.Type {
 	case "request":
-		var request model.Request
-		if json.Unmarshal(event.Data, &request) == nil {
-			for index := len(request.Input) - 1; index >= 0; index-- {
-				if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
-					return "prompt=" + publicSessionPreview(request.Input[index].Content)
-				}
-			}
-		}
+		return "prompt=" + publicSessionPreview(sessionRequestPrompt(event.Data))
 	case "model_message":
-		var response model.Response
-		if json.Unmarshal(event.Data, &response) == nil {
+		if response, ok := sessionModelResponse(event.Data); ok {
 			return fmt.Sprintf("status=%s tool_calls=%d text=%s", response.Status, len(response.ToolCalls), publicSessionPreview(response.Text))
 		}
 	case "tool_result":
-		var result tools.Result
-		if json.Unmarshal(event.Data, &result) == nil {
-			return fmt.Sprintf("status=%s", result.Status)
+		if status, ok := sessionToolStatus(event.Data); ok {
+			return "status=" + status
+		}
+	case "step_metrics":
+		if metrics, ok := sessionStepMetrics(event.Data); ok {
+			return agentStepMetricsMessage(metrics)
 		}
 	}
 	return ""
+}
+
+func sessionRequestPrompt(data json.RawMessage) string {
+	var request model.Request
+	if json.Unmarshal(data, &request) != nil {
+		return ""
+	}
+	for index := len(request.Input) - 1; index >= 0; index-- {
+		if request.Input[index].Type == "message" && request.Input[index].Role == "user" {
+			return request.Input[index].Content
+		}
+	}
+	return ""
+}
+
+func sessionModelResponse(data json.RawMessage) (model.Response, bool) {
+	var response model.Response
+	if json.Unmarshal(data, &response) != nil {
+		return model.Response{}, false
+	}
+	return response, true
+}
+
+func sessionToolStatus(data json.RawMessage) (string, bool) {
+	var result tools.Result
+	if json.Unmarshal(data, &result) != nil {
+		return "", false
+	}
+	return string(result.Status), true
+}
+
+func sessionStepMetrics(data json.RawMessage) (usage.StepMetrics, bool) {
+	var metrics usage.StepMetrics
+	if json.Unmarshal(data, &metrics) != nil {
+		return usage.StepMetrics{}, false
+	}
+	return metrics, true
 }
 
 func publicSessionPreview(value string) string {
@@ -959,8 +992,73 @@ func writeOutcome(writer io.Writer, format string, outcome agent.Outcome) error 
 	if _, err := fmt.Fprintln(writer, outcome.Text); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(writer, "session=%s input_tokens=%s output_tokens=%s total_tokens=%s source=%s exact=%t\n", outcome.SessionID, usageValue(outcome.Usage.InputTokens), usageValue(outcome.Usage.OutputTokens), usageValue(outcome.Usage.TotalTokens), outcome.Usage.Source, outcome.Usage.Exact)
-	return err
+	if _, err := fmt.Fprintf(writer, "session=%s input_tokens=%s output_tokens=%s total_tokens=%s source=%s exact=%t context_tokens_total=%d\n", outcome.SessionID, usageValue(outcome.Usage.InputTokens), usageValue(outcome.Usage.OutputTokens), usageValue(outcome.Usage.TotalTokens), outcome.Usage.Source, outcome.Usage.Exact, outcome.ContextTokensTotal); err != nil {
+		return err
+	}
+	return writeSessionStepMetrics(writer, outcome.Steps, false)
+}
+
+func writeSessionStepMetrics(writer io.Writer, steps []usage.StepMetrics, markdown bool) error {
+	if len(steps) == 0 {
+		return nil
+	}
+	if markdown {
+		if _, err := fmt.Fprint(writer, "### Model Steps\n\n| Step | Context | Provider input | Output | Output source | Generation tokens/sec | Generation time | Request tokens/sec | Request time |\n| ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |\n"); err != nil {
+			return err
+		}
+		for _, step := range steps {
+			if _, err := fmt.Fprintf(writer, "| %d | %d `%s` | %s | %d | `%s` | %s | %s | %.2f | %d ms |\n", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step)); err != nil {
+				return err
+			}
+		}
+		_, err := fmt.Fprintln(writer)
+		return err
+	}
+	for _, step := range steps {
+		if _, err := fmt.Fprintln(writer, agentStepMetricsMessage(step)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func agentStepMetricsMessage(step usage.StepMetrics) string {
+	return fmt.Sprintf("step=%d context_tokens=%d context_source=%s provider_input_tokens=%s output_tokens=%d output_source=%s generation_tokens_per_second=%s generation_duration_ms=%s request_wall_clock_tokens_per_second=%.2f request_duration_ms=%d", step.Round, step.ContextTokens, step.ContextSource, usageValue(step.ProviderInputTokens), step.OutputTokens, step.OutputSource, optionalMetricRate(generationRate(step)), optionalMetricDuration(step.GenerationDurationMs), requestWallRate(step), requestWallDuration(step))
+}
+
+func generationRate(step usage.StepMetrics) *float64 {
+	if step.LegacyDurationKind == "request_wall_clock" {
+		return nil
+	}
+	return step.OutputTokensPerSecond
+}
+
+func requestWallRate(step usage.StepMetrics) float64 {
+	if step.RequestWallClockTokensPerSecond > 0 || step.LegacyDurationKind != "request_wall_clock" || step.OutputTokensPerSecond == nil {
+		return step.RequestWallClockTokensPerSecond
+	}
+	return *step.OutputTokensPerSecond
+}
+
+func requestWallDuration(step usage.StepMetrics) int64 {
+	if step.RequestDurationMs > 0 || step.LegacyDurationKind != "request_wall_clock" {
+		return step.RequestDurationMs
+	}
+	return step.LegacyDurationMs
+}
+
+func optionalMetricRate(rate *float64) string {
+	if rate == nil {
+		return "unknown"
+	}
+	return strconv.FormatFloat(*rate, 'f', 2, 64)
+}
+
+func optionalMetricDuration(milliseconds int64) string {
+	if milliseconds <= 0 {
+		return "unknown"
+	}
+	return strconv.FormatInt(milliseconds, 10) + " ms"
 }
 
 func usageValue(value *int64) string {

@@ -118,12 +118,16 @@ func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	var streamed strings.Builder
+	terminalSeen := false
 	response, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, func(event model.StreamEvent) error {
 		streamed.WriteString(event.Text)
+		if event.Type == "response.completed" {
+			terminalSeen = true
+		}
 		return nil
 	})
-	if err != nil || response.ID != "stream-1" || response.Text != "Hello" || streamed.String() != "Hello" {
-		t.Fatalf("unexpected streamed response: %+v streamed=%q error=%v", response, streamed.String(), err)
+	if err != nil || response.ID != "stream-1" || response.Text != "Hello" || streamed.String() != "Hello" || !terminalSeen {
+		t.Fatalf("unexpected streamed response: %+v streamed=%q terminal=%t error=%v", response, streamed.String(), terminalSeen, err)
 	}
 }
 

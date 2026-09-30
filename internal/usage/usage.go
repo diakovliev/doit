@@ -3,6 +3,22 @@ package usage
 
 import "context"
 
+// StepMetrics records context and generation measurements for one model round.
+type StepMetrics struct {
+	Round                           int      `json:"round"`
+	ContextTokens                   int64    `json:"context_tokens"`
+	ContextSource                   Source   `json:"context_source"`
+	ProviderInputTokens             *int64   `json:"provider_input_tokens,omitempty"`
+	OutputTokens                    int64    `json:"output_tokens"`
+	OutputSource                    Source   `json:"output_source"`
+	RequestDurationMs               int64    `json:"request_duration_ms"`
+	RequestWallClockTokensPerSecond float64  `json:"request_wall_clock_tokens_per_second"`
+	GenerationDurationMs            int64    `json:"generation_duration_ms,omitempty"`
+	OutputTokensPerSecond           *float64 `json:"output_tokens_per_second,omitempty"`
+	LegacyDurationKind              string   `json:"duration_kind,omitempty"`
+	LegacyDurationMs                int64    `json:"duration_ms,omitempty"`
+}
+
 // Source describes where token counts came from.
 type Source string
 

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/diakovliev/doit/internal/apperr"
@@ -37,14 +38,15 @@ func queryHistory(events []Event, query HistoryQuery) (HistoryResult, error) {
 	result := HistoryResult{Events: make([]HistoryEvent, 0, options.maxEvents)}
 	usedBytes := 0
 	for _, event := range events {
-		if !matchesHistoryEvent(event, query, options.eventTypes, options.needle) {
+		summary := summarizeHistoryEvent(event)
+		if !matchesHistoryEvent(event, summary, query, options.eventTypes, options.needle) {
 			continue
 		}
 		if len(result.Events) >= options.maxEvents {
 			markHistoryTruncated(&result)
 			break
 		}
-		candidate, encodedBytes, eventTruncated, eventErr := boundedHistoryEvent(event, usedBytes, options.maxBytes)
+		candidate, encodedBytes, eventTruncated, eventErr := boundedHistoryEvent(event, summary, usedBytes, options.maxBytes)
 		if eventErr != nil {
 			return HistoryResult{}, eventErr
 		}
@@ -94,7 +96,7 @@ func normalizeHistoryQuery(query HistoryQuery) (historyQueryOptions, error) {
 	return historyQueryOptions{maxEvents: maxEvents, maxBytes: maxBytes, eventTypes: eventTypes, needle: strings.ToLower(query.Query)}, nil
 }
 
-func matchesHistoryEvent(event Event, query HistoryQuery, eventTypes map[string]struct{}, needle string) bool {
+func matchesHistoryEvent(event Event, summary string, query HistoryQuery, eventTypes map[string]struct{}, needle string) bool {
 	// Note: history search is intentionally limited to public, redacted events.
 	if event.Sequence <= query.AfterSequence || (query.BeforeSequence > 0 && event.Sequence >= query.BeforeSequence) {
 		return false
@@ -104,11 +106,11 @@ func matchesHistoryEvent(event Event, query HistoryQuery, eventTypes map[string]
 			return false
 		}
 	}
-	return needle == "" || strings.Contains(strings.ToLower(event.Type+" "+string(event.Data)), needle)
+	return needle == "" || strings.Contains(strings.ToLower(event.Type+" "+summary+" "+string(event.Data)), needle)
 }
 
-func boundedHistoryEvent(event Event, usedBytes, maxBytes int) (*HistoryEvent, int, bool, error) {
-	candidate := &HistoryEvent{Sequence: event.Sequence, Timestamp: event.Timestamp, Type: event.Type, Data: append(json.RawMessage(nil), event.Data...)}
+func boundedHistoryEvent(event Event, summary string, usedBytes, maxBytes int) (*HistoryEvent, int, bool, error) {
+	candidate := &HistoryEvent{Sequence: event.Sequence, Timestamp: event.Timestamp, Type: event.Type, Summary: summary, Data: append(json.RawMessage(nil), event.Data...)}
 	encoded, err := json.Marshal(candidate)
 	if err != nil {
 		return nil, 0, false, apperr.Wrap(apperr.KindTool, "session.history", err)
@@ -125,6 +127,85 @@ func boundedHistoryEvent(event Event, usedBytes, maxBytes int) (*HistoryEvent, i
 		return nil, 0, true, nil
 	}
 	return candidate, len(encoded), true, nil
+}
+
+type historyRequestPayload struct {
+	Input []historyRequestItem `json:"input"`
+}
+
+type historyRequestItem struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type historyModelPayload struct {
+	Status    string            `json:"status"`
+	Text      string            `json:"text"`
+	ToolCalls []json.RawMessage `json:"tool_calls"`
+}
+
+type historyToolResultPayload struct {
+	Status      string                  `json:"status"`
+	Diagnostics []historyDiagnosticItem `json:"diagnostics"`
+}
+
+type historyDiagnosticItem struct {
+	Message string `json:"message"`
+}
+
+func summarizeHistoryEvent(event Event) string {
+	switch event.Type {
+	case "request":
+		return summarizeRequestEvent(event.Data)
+	case "model_message":
+		return summarizeModelEvent(event.Data)
+	case "tool_result":
+		return summarizeToolResultEvent(event.Data)
+	}
+	return ""
+}
+
+func summarizeRequestEvent(data json.RawMessage) string {
+	var request historyRequestPayload
+	if json.Unmarshal(data, &request) != nil {
+		return ""
+	}
+	for index := len(request.Input) - 1; index >= 0; index-- {
+		item := request.Input[index]
+		if item.Type == "message" && item.Role == "user" {
+			return "request: " + historyPreview(item.Content, 240)
+		}
+	}
+	return ""
+}
+
+func summarizeModelEvent(data json.RawMessage) string {
+	var message historyModelPayload
+	if json.Unmarshal(data, &message) != nil {
+		return ""
+	}
+	return fmt.Sprintf("status=%s tool_calls=%d text=%s", message.Status, len(message.ToolCalls), historyPreview(message.Text, 240))
+}
+
+func summarizeToolResultEvent(data json.RawMessage) string {
+	var result historyToolResultPayload
+	if json.Unmarshal(data, &result) != nil {
+		return ""
+	}
+	summary := "status=" + result.Status
+	if len(result.Diagnostics) > 0 && result.Diagnostics[0].Message != "" {
+		summary += " diagnostic=" + historyPreview(result.Diagnostics[0].Message, 180)
+	}
+	return summary
+}
+
+func historyPreview(value string, maximum int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) > maximum {
+		return value[:maximum] + "..."
+	}
+	return value
 }
 
 func markHistoryTruncated(result *HistoryResult) {
@@ -156,7 +237,7 @@ func NewHistoryTool(store Store) tools.Tool {
 func (tool *historyTool) Definition() tools.Definition {
 	return tools.Definition{
 		Name:           "session.history",
-		Description:    "Search bounded public events from the active session. Older context is available here when it was trimmed from the current model request.",
+		Description:    "Search bounded public events from the active session. Results include concise summaries plus bounded original event data. Search summaries or exact event content when older context is needed.",
 		Parameters:     json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","maxLength":2048},"event_types":{"type":"array","items":{"type":"string"},"maxItems":8},"after_sequence":{"type":"integer","minimum":0},"before_sequence":{"type":"integer","minimum":0},"max_events":{"type":"integer","minimum":1,"maximum":100},"max_bytes":{"type":"integer","minimum":1,"maximum":65536}}}`),
 		Risk:           tools.RiskReadOnly,
 		Timeout:        5 * 1e9,

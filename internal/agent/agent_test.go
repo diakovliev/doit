@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -41,6 +42,9 @@ func (client *streamingTestClient) CreateStream(_ context.Context, _ model.Reque
 		return model.Response{}, errors.New("streaming transport unavailable")
 	}
 	if err := onEvent(model.StreamEvent{Type: "response.output_text.delta", Text: "streamed"}); err != nil {
+		return model.Response{}, err
+	}
+	if err := onEvent(model.StreamEvent{Type: "response.completed"}); err != nil {
 		return model.Response{}, err
 	}
 	return model.Response{Status: "completed", Text: "streamed"}, nil
@@ -232,6 +236,73 @@ func TestResumeHistoryDropsOrphanedAndIncompleteToolItems(t *testing.T) {
 	}
 }
 
+func TestCompactResumeHistoryKeepsRecentWindowAndExactFacts(t *testing.T) {
+	compacted := compactResumeHistory(resumeMemoryFixture())
+	assertResumeMemoryFacts(t, compacted[0].Content)
+	assertRecentResumeWindow(t, compacted)
+	assertRecentResumeToolPair(t, compacted)
+}
+
+func resumeMemoryFixture() []model.InputItem {
+	history := make([]model.InputItem, 0, 35)
+	for index := range 20 {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: fmt.Sprintf("older assistant turn %d", index)})
+	}
+	history = append(history, model.InputItem{Type: "function_call", CallID: "call-1", Name: "fs.read", Arguments: `{"path":"internal/app/app.go"}`}, model.InputItem{Type: "function_call_output", CallID: "call-1", Output: `{"status":"succeeded","data":{"changed_paths":["README.md"],"passed":true,"exit_code":0}}`})
+	for index := range 10 {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: fmt.Sprintf("recent assistant turn %d", index)})
+	}
+	return append(history, model.InputItem{Type: "function_call", CallID: "recent-call", Name: "fs.read", Arguments: `{"path":"README.md"}`}, model.InputItem{Type: "function_call_output", CallID: "recent-call", Output: `{"status":"succeeded"}`}, model.InputItem{Type: "message", Role: "assistant", Content: "most recent assistant response"})
+}
+
+func assertResumeMemoryFacts(t *testing.T, memory string) {
+	t.Helper()
+	if !strings.Contains(memory, `"path":"internal/app/app.go"`) || !strings.Contains(memory, `changed_paths = ["README.md"]`) || !strings.Contains(memory, "passed = true") {
+		t.Fatalf("exact tool facts were not preserved: %s", memory)
+	}
+}
+
+func assertRecentResumeWindow(t *testing.T, compacted []model.InputItem) {
+	t.Helper()
+	if len(compacted) != recentResumeHistoryItems+1 || !strings.Contains(compacted[0].Content, "Earlier context, chronological segments") {
+		t.Fatalf("expected one memory item and a recent exact window, got %d items: %+v", len(compacted), compacted)
+	}
+	if compacted[1].Type != "message" || compacted[len(compacted)-1].Content != "most recent assistant response" {
+		t.Fatalf("recent history was not preserved exactly: %+v", compacted)
+	}
+}
+
+func assertRecentResumeToolPair(t *testing.T, compacted []model.InputItem) {
+	t.Helper()
+	callIndex := len(compacted) - 3
+	if compacted[callIndex].Type != "function_call" || compacted[callIndex+1].Type != "function_call_output" || compacted[callIndex].CallID != compacted[callIndex+1].CallID {
+		t.Fatalf("recent function pair was broken: %+v", compacted[1:])
+	}
+}
+
+func TestResumeMemoryCarriesExactFactsAcrossCompaction(t *testing.T) {
+	initial := []model.InputItem{
+		{Type: "function_call", CallID: "call-1", Name: "process.run", Arguments: `{"task":"test"}`},
+		{Type: "function_call_output", CallID: "call-1", Output: `{"status":"succeeded","data":{"task":"test","passed":true,"exit_code":0}}`},
+	}
+	firstMemory := buildResumeMemory(initial)
+	secondMemory := buildResumeMemory([]model.InputItem{{Type: "message", Role: "user", Content: firstMemory}})
+	if !strings.Contains(secondMemory, `tool process.run arguments = {"task":"test"}`) || !strings.Contains(secondMemory, `passed = true`) {
+		t.Fatalf("exact facts were lost during rolling compaction: %s", secondMemory)
+	}
+}
+
+func TestResumeMemoryHierarchicallyBoundsLongHistory(t *testing.T) {
+	history := make([]model.InputItem, 0, 60)
+	for index := range 60 {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: fmt.Sprintf("turn %d %s", index, strings.Repeat("detail ", 80))})
+	}
+	memory := buildResumeMemory(history)
+	if !strings.Contains(memory, "period 1:") || len(memory) > 4200 {
+		t.Fatalf("long history was not hierarchically bounded: bytes=%d memory=%s", len(memory), memory)
+	}
+}
+
 type testTool struct{}
 
 func (testTool) Definition() tools.Definition {
@@ -250,9 +321,70 @@ func TestRunnerCompletesFunctionCallLoopAndPersistsSession(t *testing.T) {
 	if err != nil || outcome.Text != "finished" || outcome.SessionID == "" {
 		t.Fatalf("unexpected outcome: %+v, error=%v", outcome, err)
 	}
+	assertStepMetrics(t, outcome.Steps)
+	if outcome.ContextTokensTotal == 0 {
+		t.Fatalf("expected accumulated context tokens: %+v", outcome)
+	}
 	record, err := store.Load(context.Background(), outcome.SessionID)
 	if err != nil || len(record.Events) < 3 || record.Result == nil {
 		t.Fatalf("unexpected session: %+v, error=%v", record, err)
+	}
+	if len(record.Result.Steps) != len(outcome.Steps) || record.Result.ContextTokensTotal != outcome.ContextTokensTotal {
+		t.Fatalf("step metrics were not persisted: %+v", record.Result)
+	}
+	assertStepMetricEvents(t, record.Events, len(outcome.Steps))
+}
+
+func assertStepMetricEvents(t *testing.T, events []session.Event, expected int) {
+	t.Helper()
+	count := 0
+	for _, event := range events {
+		if event.Type == "step_metrics" {
+			count++
+		}
+	}
+	if count != expected {
+		t.Fatalf("expected %d persisted step-metrics events, got %d", expected, count)
+	}
+}
+
+func assertStepMetrics(t *testing.T, steps []usage.StepMetrics) {
+	t.Helper()
+	if len(steps) != 2 {
+		t.Fatalf("expected one metric per model round: %+v", steps)
+	}
+	for index, step := range steps {
+		assertRequestStepMetrics(t, step, index+1)
+	}
+	assertNonStreamingProviderMetrics(t, steps[1])
+}
+
+func assertRequestStepMetrics(t *testing.T, step usage.StepMetrics, round int) {
+	t.Helper()
+	if step.Round != round || step.ContextTokens <= 0 || step.RequestDurationMs < 0 || step.RequestWallClockTokensPerSecond <= 0 {
+		t.Fatalf("invalid step metrics: %+v", step)
+	}
+}
+
+func assertNonStreamingProviderMetrics(t *testing.T, step usage.StepMetrics) {
+	t.Helper()
+	if step.ProviderInputTokens == nil || step.OutputSource != usage.SourceProvider || step.OutputTokens != 2 || step.OutputTokensPerSecond != nil {
+		t.Fatalf("provider usage provenance was not retained: %+v", step)
+	}
+}
+
+func TestStreamingRoundMeasuresGenerationRateSeparately(t *testing.T) {
+	root := t.TempDir()
+	runner, store := newAgentTestRunnerWithEphemeral(t, root, true)
+	defer func() { _ = store.Close() }()
+	runner.Streaming = true
+	runner.Client = &streamingTestClient{}
+	outcome, err := runner.Run(context.Background(), Task{Command: "run", Request: "stream", Workspace: root, Model: "test-model"})
+	if err != nil {
+		t.Fatalf("run streaming metrics task: %v", err)
+	}
+	if len(outcome.Steps) != 1 || outcome.Steps[0].OutputTokensPerSecond == nil || outcome.Steps[0].GenerationDurationMs < 0 || outcome.Steps[0].RequestWallClockTokensPerSecond <= 0 {
+		t.Fatalf("stream generation and request rates were not separated: %+v", outcome.Steps)
 	}
 }
 

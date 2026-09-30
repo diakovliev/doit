@@ -16,7 +16,7 @@ import (
 
 const defaultInputTokenBudget = 16000
 
-const sessionHistoryGuidance = "Session context is bounded and does not contain the complete prior session. If you need an older decision, tool result, validation result, or earlier turn, use the session.history tool with a focused query and cursor. Do not assume omitted history."
+const sessionHistoryGuidance = "Session context contains a recent exact window and a lossy summary of older public turns; selected paths and exact tool facts may be preserved separately. If an older detail matters, use session.history with a focused query or sequence cursor. Its results include concise summaries and bounded original event data. Do not treat summaries as exact evidence."
 
 const toolWorkflowGuidance = "Tool workflow: inspect before changing files; use fs.read/fs.hash or git.status/git.diff first. Prefer exact structured edits for small changes and dry_run previews before applying. If a tool reports conflict or ambiguous matches, inspect again instead of retrying the same arguments. For commits, review git.status and git.diff, then pass exact changed paths to git.commit, including deleted paths."
 
@@ -82,34 +82,55 @@ type Policy struct {
 
 // Build returns a token-bounded normalized model request and its input usage.
 func (builder *Builder) Build(ctx stdcontext.Context, request Request) (model.Request, usage.Counts, error) {
-	if builder == nil || builder.filesystem == nil {
-		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, errors.New("context builder filesystem is required")
+	if err := builder.validateRequest(request); err != nil {
+		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, err
 	}
-	if request.UserInput == "" {
-		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, errors.New("context request is empty")
-	}
-	input := append([]model.InputItem(nil), request.History...)
-	policy := request.Policy
-	if policy == nil {
-		policy = &Policy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
-	}
-	historyCount := len(input)
-	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput})
-	if policy.IncludeGitStatus {
-		input = builder.appendGitStatus(ctx, input)
-	}
-	input = builder.appendSelectedContext(ctx, input, request.Paths, policy.IncludeWorkspaceListing)
+	input, policy := builder.buildInput(ctx, request)
 	instructions := builder.buildInstructions(ctx, request.Instructions, request.Tools, policy.IncludeGuidance)
 	normalized := model.Request{Model: request.Model, ThinkingEffort: request.ThinkingEffort, Instructions: strings.TrimSpace(instructions), Input: input, Tools: request.Tools, ToolChoice: toolChoice(request.Tools), MaxOutputTokens: request.MaxOutputTokens}
 	budget := request.MaxInputTokens
 	if budget <= 0 {
 		budget = defaultInputTokenBudget
 	}
-	counts, err := builder.fitBudget(ctx, &normalized, budget, historyCount)
+	counts, err := builder.fitBudget(ctx, &normalized, budget)
 	if err != nil {
 		return model.Request{}, usage.Counts{Source: usage.SourceUnknown}, err
 	}
 	return normalized, counts, nil
+}
+
+func (builder *Builder) validateRequest(request Request) error {
+	if builder == nil || builder.filesystem == nil {
+		return errors.New("context builder filesystem is required")
+	}
+	if request.UserInput == "" {
+		return errors.New("context request is empty")
+	}
+	return nil
+}
+
+func (builder *Builder) buildInput(ctx stdcontext.Context, request Request) ([]model.InputItem, *Policy) {
+	input := append([]model.InputItem(nil), request.History...)
+	for index := range input {
+		if strings.HasPrefix(input[index].Content, rollingMemoryPrefix) {
+			input[index].ContextPriority = model.ContextPriorityMemory
+		} else if input[index].ContextPriority != model.ContextPriorityMemory && input[index].ContextPriority != model.ContextPriorityRollingMemory {
+			input[index].ContextPriority = model.ContextPriorityRecent
+		}
+	}
+	policy := request.Policy
+	if policy == nil {
+		policy = &Policy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
+	}
+	input = append(input, model.InputItem{Type: "message", Role: "user", Content: request.UserInput, ContextPriority: model.ContextPriorityCurrent})
+	input = builder.appendExplicitPaths(ctx, input, request.Paths)
+	if policy.IncludeGitStatus {
+		input = builder.appendGitStatus(ctx, input)
+	}
+	if policy.IncludeWorkspaceListing {
+		input = builder.appendWorkspaceListing(ctx, input, len(request.Paths) == 0)
+	}
+	return input, policy
 }
 
 func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions string, definitions []model.ToolDefinition, includeGuidance bool) string {
@@ -125,14 +146,18 @@ func (builder *Builder) buildInstructions(ctx stdcontext.Context, instructions s
 	return strings.TrimSpace(instructions)
 }
 
-func (builder *Builder) appendSelectedContext(ctx stdcontext.Context, input []model.InputItem, paths []string, includeWorkspaceListing bool) []model.InputItem {
+func (builder *Builder) appendExplicitPaths(ctx stdcontext.Context, input []model.InputItem, paths []string) []model.InputItem {
 	for _, path := range paths {
 		readResponse, err := builder.filesystem.Read(ctx, workspacefs.ReadRequest{Path: path, MaxBytes: 16 * 1024})
 		if err == nil {
-			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "File: " + readResponse.Path + "\n" + readResponse.Content})
+			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "File: " + readResponse.Path + "\n" + readResponse.Content, ContextPriority: model.ContextPrioritySelected})
 		}
 	}
-	if len(paths) == 0 && includeWorkspaceListing {
+	return input
+}
+
+func (builder *Builder) appendWorkspaceListing(ctx stdcontext.Context, input []model.InputItem, include bool) []model.InputItem {
+	if include {
 		if listing, err := builder.filesystem.List(ctx, workspacefs.ListRequest{MaxEntries: 100}); err == nil {
 			input = append(input, model.InputItem{Type: "message", Role: "user", Content: "Workspace entries:\n" + formatEntries(listing)})
 		}
@@ -151,7 +176,7 @@ func (builder *Builder) appendGitStatus(ctx stdcontext.Context, input []model.In
 	return append(input, model.InputItem{Type: "message", Role: "user", Content: "Current Git status:\n" + status})
 }
 
-func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request, budget, historyCount int) (usage.Counts, error) {
+func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request, budget int) (usage.Counts, error) {
 	for len(request.Input) > 1 {
 		counts, err := builder.countRequest(ctx, *request)
 		if err != nil {
@@ -160,11 +185,14 @@ func (builder *Builder) fitBudget(ctx stdcontext.Context, request *model.Request
 		if counts.InputTokens != nil && *counts.InputTokens <= int64(budget) {
 			return counts, nil
 		}
-		if historyCount > 0 {
-			request.Input, historyCount = dropOldestHistoryItem(request.Input, historyCount)
-			continue
+		trimmed, removed, ok := dropOldestContextItem(request.Input)
+		if !ok {
+			return usage.Counts{Source: usage.SourceUnknown}, errors.New("context exceeds input token budget")
 		}
-		request.Input = request.Input[:len(request.Input)-1]
+		request.Input = trimmed
+		if hasRecentContext(removed) {
+			request.Input = updateRollingMemory(request.Input, removed)
+		}
 	}
 	counts, err := builder.countRequest(ctx, *request)
 	if err != nil {
@@ -193,38 +221,62 @@ func (builder *Builder) FitRequest(ctx stdcontext.Context, request *model.Reques
 		if counts.InputTokens != nil && *counts.InputTokens <= int64(budget) {
 			return counts, nil
 		}
-		trimmed, ok := dropOldestContextItem(request.Input)
+		trimmed, removed, ok := dropOldestContextItem(request.Input)
 		if !ok {
 			return usage.Counts{Source: usage.SourceUnknown}, errors.New("model request exceeds input token budget")
 		}
 		request.Input = trimmed
+		if hasRecentContext(removed) {
+			request.Input = updateRollingMemory(request.Input, removed)
+		}
 	}
 }
 
-func dropOldestContextItem(input []model.InputItem) ([]model.InputItem, bool) {
+func dropOldestContextItem(input []model.InputItem) (trimmed []model.InputItem, removed []model.InputItem, ok bool) {
 	protectedUser := lastUserMessage(input)
+	dropIndex := -1
 	for index, item := range input {
 		if index == protectedUser {
 			continue
 		}
-		if item.Type == "function_call" || item.Type == "function_call_output" {
-			trimmed, ok := dropFunctionPair(input, index, item.CallID)
-			if ok {
-				return trimmed, true
-			}
+		if dropIndex < 0 || item.ContextPriority < input[dropIndex].ContextPriority {
+			dropIndex = index
 		}
-		return append(append([]model.InputItem(nil), input[:index]...), input[index+1:]...), true
 	}
-	return input, false
+	if dropIndex < 0 {
+		return input, nil, false
+	}
+	item := input[dropIndex]
+	if item.Type == "function_call" || item.Type == "function_call_output" {
+		if trimmed, ok := dropFunctionPair(input, dropIndex, item.CallID); ok {
+			matching := matchingFunctionItem(input, dropIndex, item.CallID)
+			return trimmed, []model.InputItem{input[min(dropIndex, matching)], input[max(dropIndex, matching)]}, true
+		}
+	}
+	trimmed = append(append([]model.InputItem(nil), input[:dropIndex]...), input[dropIndex+1:]...)
+	return trimmed, []model.InputItem{item}, true
+}
+
+func hasRecentContext(items []model.InputItem) bool {
+	for _, item := range items {
+		if item.ContextPriority == model.ContextPriorityRecent {
+			return true
+		}
+	}
+	return false
 }
 
 func lastUserMessage(input []model.InputItem) int {
+	selected := -1
+	priority := -1
 	for index := len(input) - 1; index >= 0; index-- {
-		if input[index].Type == "message" && input[index].Role == "user" {
-			return index
+		item := input[index]
+		if item.Type == "message" && item.Role == "user" && item.ContextPriority >= priority {
+			selected = index
+			priority = item.ContextPriority
 		}
 	}
-	return -1
+	return selected
 }
 
 func dropFunctionPair(input []model.InputItem, index int, callID string) ([]model.InputItem, bool) {
@@ -259,27 +311,6 @@ func matchingFunctionItem(input []model.InputItem, index int, callID string) int
 		}
 	}
 	return -1
-}
-
-func dropOldestHistoryItem(input []model.InputItem, historyCount int) ([]model.InputItem, int) {
-	if historyCount <= 0 || len(input) == 0 {
-		return input, historyCount
-	}
-	dropped := input[0]
-	input = input[1:]
-	historyCount--
-	if dropped.Type != "function_call" || dropped.CallID == "" {
-		return input, historyCount
-	}
-	for index := 0; index < historyCount; index++ {
-		item := input[index]
-		if item.Type == "function_call_output" && item.CallID == dropped.CallID {
-			input = append(input[:index], input[index+1:]...)
-			historyCount--
-			break
-		}
-	}
-	return input, historyCount
 }
 
 func (builder *Builder) countRequest(ctx stdcontext.Context, request model.Request) (usage.Counts, error) {

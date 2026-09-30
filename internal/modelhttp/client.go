@@ -289,18 +289,36 @@ func (client *Client) processStreamData(dataLines []string, onEvent func(model.S
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
 	}
-	if event.Delta != "" {
-		result.text += event.Delta
-		if onEvent != nil {
-			if err := onEvent(model.StreamEvent{Type: event.Type, Text: event.Delta}); err != nil {
-				return err
-			}
+	if err := forwardStreamDelta(event, onEvent, result); err != nil {
+		return err
+	}
+	if isTerminalStreamEvent(event.Type) {
+		if err := forwardTerminalStreamEvent(event.Type, onEvent); err != nil {
+			return err
+		}
+		if len(event.Response) > 0 {
+			result.body = append([]byte(nil), event.Response...)
 		}
 	}
-	if isTerminalStreamEvent(event.Type) && len(event.Response) > 0 {
-		result.body = append([]byte(nil), event.Response...)
-	}
 	return nil
+}
+
+func forwardStreamDelta(event streamEvent, onEvent func(model.StreamEvent) error, result *streamReadResult) error {
+	if event.Delta == "" {
+		return nil
+	}
+	result.text += event.Delta
+	if onEvent == nil {
+		return nil
+	}
+	return onEvent(model.StreamEvent{Type: event.Type, Text: event.Delta})
+}
+
+func forwardTerminalStreamEvent(eventType string, onEvent func(model.StreamEvent) error) error {
+	if onEvent == nil {
+		return nil
+	}
+	return onEvent(model.StreamEvent{Type: eventType})
 }
 
 type streamEvent struct {
