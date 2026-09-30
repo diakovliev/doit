@@ -501,8 +501,9 @@ func replayModelMessage(history []model.InputItem, pending []pendingCall, data j
 	if json.Unmarshal(data, &response) != nil {
 		return history, pending
 	}
-	if response.Text != "" {
-		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: response.Text})
+	publicText := model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
+	if publicText != "" {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: publicText})
 	}
 	for _, call := range response.ToolCalls {
 		pending = append(pending, pendingCall{index: len(history), callID: call.CallID})

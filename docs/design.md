@@ -205,6 +205,8 @@ The history tool is a retrieval escape hatch, not an instruction to inject the c
 
 The model layer exposes a provider-neutral interface to the orchestrator. The first adapter should be a direct HTTP adapter for backends that implement the OpenAI Responses API contract. The hosting location and provider name are configuration data, not compile-time dependencies.
 
+If a backend echoes a structured function-call argument as a duplicate JSON object in its public message text, remove that object from the displayed/replayed text only when its compact JSON exactly matches a function call in the same response. Preserve the structured function call and unrelated JSON prose.
+
 The design is based on the [OpenAI API overview](https://developers.openai.com/api/reference/overview) and the [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create). `doit` uses the Responses API as its canonical model surface. It does not require the Realtime or Administration APIs.
 
 #### OpenAI-Compatible Backend Contract

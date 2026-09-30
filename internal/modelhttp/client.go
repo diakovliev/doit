@@ -670,6 +670,7 @@ func (client *Client) normalizeResponse(ctx context.Context, requestBody, respon
 			response.ToolCalls = append(response.ToolCalls, model.ToolCall{CallID: item.CallID, Name: name, Arguments: item.Arguments})
 		}
 	}
+	response.Text = model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
 	response.Usage = client.estimateUsage(ctx, requestBody, []byte(response.Text))
 	if wire.Usage != nil {
 		input := wire.Usage.InputTokens

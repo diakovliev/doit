@@ -32,6 +32,25 @@ func TestClientNormalizesTextFunctionCallsAndProviderUsage(t *testing.T) {
 	requireProviderUsage(t, response.Usage)
 }
 
+func TestClientStripsToolArgumentsDuplicatedInMessageText(t *testing.T) {
+	client, err := New(config.BackendProfile{APIRoot: "http://localhost/v1", Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	responseBody := []byte(`{"id":"duplicate-tool-text","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"I will inspect docs. { \"path\" : \"docs\" }"}]},{"type":"function_call","call_id":"list-docs","name":"fs.list","arguments":"{\"path\":\"docs\"}"}]}`)
+	response, err := client.normalizeResponse(context.Background(), []byte(`{}`), responseBody, http.Header{}, "request-1", nil)
+	if err != nil {
+		t.Fatalf("normalize duplicate tool text: %v", err)
+	}
+	if response.Text != "I will inspect docs." || len(response.ToolCalls) != 1 || response.ToolCalls[0].Arguments != `{"path":"docs"}` {
+		t.Fatalf("duplicated tool arguments were not filtered safely: %+v", response)
+	}
+	plainJSONResponse, err := client.normalizeResponse(context.Background(), []byte(`{}`), []byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"path\":\"docs\"}"}]}]}`), http.Header{}, "request-2", nil)
+	if err != nil || plainJSONResponse.Text != `{"path":"docs"}` {
+		t.Fatalf("standalone JSON prose was unexpectedly removed: response=%+v error=%v", plainJSONResponse, err)
+	}
+}
+
 func TestClientUsesConfiguredRequestTimeout(t *testing.T) {
 	client, err := New(config.BackendProfile{APIRoot: "https://example.test/v1", Model: "test-model"}, Options{Timeout: 17 * time.Minute})
 	if err != nil {

@@ -403,7 +403,8 @@ func markdownEventFields(event session.Event) (status, toolCalls, text string) {
 		return "-", "-", publicSessionPreview(sessionRequestPrompt(event.Data))
 	case "model_message":
 		if response, ok := sessionModelResponse(event.Data); ok {
-			return response.Status, strconv.Itoa(len(response.ToolCalls)), publicSessionPreview(response.Text)
+			text := model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
+			return response.Status, strconv.Itoa(len(response.ToolCalls)), publicSessionPreview(text)
 		}
 	case "tool_result":
 		if status, ok := sessionToolStatus(event.Data); ok {
@@ -455,7 +456,7 @@ func fullMarkdownEventText(event session.Event) string {
 	case "model_message":
 		var response model.Response
 		if json.Unmarshal(event.Data, &response) == nil {
-			return response.Text
+			return model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
 		}
 	}
 	return ""
@@ -597,7 +598,8 @@ func humanEventSummary(event session.Event) string {
 		return "prompt=" + publicSessionPreview(sessionRequestPrompt(event.Data))
 	case "model_message":
 		if response, ok := sessionModelResponse(event.Data); ok {
-			return fmt.Sprintf("status=%s tool_calls=%d text=%s", response.Status, len(response.ToolCalls), publicSessionPreview(response.Text))
+			text := model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
+			return fmt.Sprintf("status=%s tool_calls=%d text=%s", response.Status, len(response.ToolCalls), publicSessionPreview(text))
 		}
 	case "tool_result":
 		if status, ok := sessionToolStatus(event.Data); ok {
