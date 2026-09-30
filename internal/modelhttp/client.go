@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -34,6 +35,7 @@ type Options struct {
 	APIKey       string
 	RateLimit    *RateLimitPolicy
 	OnRetry      func(attempt int, delay time.Duration)
+	DebugLogger  *slog.Logger
 }
 
 // RateLimitPolicy bounds retries and pacing after provider throttling.
@@ -59,6 +61,7 @@ type Client struct {
 	requestTimes      []time.Time
 	tokenReservations []tokenReservation
 	onRetry           func(int, time.Duration)
+	debugLogger       *slog.Logger
 }
 
 type tokenReservation struct {
@@ -94,7 +97,7 @@ func New(profile config.BackendProfile, options Options) (*Client, error) {
 	if options.RateLimit != nil {
 		rateLimit = normalizeRateLimit(*options.RateLimit)
 	}
-	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, requestParameters: profile.RequestParameters, rateLimit: rateLimit, onRetry: options.OnRetry}, nil
+	return &Client{profile: profile, httpClient: httpClient, tokenCounter: counter, apiKey: apiKey, requestParameters: profile.RequestParameters, rateLimit: rateLimit, onRetry: options.OnRetry, debugLogger: options.DebugLogger}, nil
 }
 
 // Create implements model.ModelClient using POST {api_root}/responses.
@@ -135,7 +138,7 @@ func (client *Client) CreateStream(ctx context.Context, request model.Request, o
 }
 
 func (client *Client) marshalRequest(request model.Request) ([]byte, error) {
-	if len(client.requestParameters) == 0 {
+	if len(client.requestParameters) == 0 && request.ThinkingEffort == "" {
 		return json.Marshal(request)
 	}
 	encoded, err := json.Marshal(request)
@@ -148,6 +151,20 @@ func (client *Client) marshalRequest(request model.Request) ([]byte, error) {
 	}
 	for name, value := range client.requestParameters {
 		wire[name] = append(json.RawMessage(nil), value...)
+	}
+	if request.ThinkingEffort != "" {
+		reasoning := map[string]json.RawMessage{}
+		if value, ok := wire["reasoning"]; ok {
+			if err := json.Unmarshal(value, &reasoning); err != nil {
+				return nil, err
+			}
+		}
+		reasoning["effort"] = json.RawMessage(strconv.Quote(request.ThinkingEffort))
+		encodedReasoning, err := json.Marshal(reasoning)
+		if err != nil {
+			return nil, err
+		}
+		wire["reasoning"] = encodedReasoning
 	}
 	return json.Marshal(wire)
 }
@@ -271,22 +288,41 @@ func (client *Client) processStreamData(dataLines []string, onEvent func(model.S
 	if data == "[DONE]" {
 		return nil
 	}
+	client.debug("raw_model_stream_event", slog.String("data", data))
 	var event streamEvent
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return apperr.Wrap(apperr.KindBackend, "modelhttp.stream", err)
 	}
-	if event.Delta != "" {
-		result.text += event.Delta
-		if onEvent != nil {
-			if err := onEvent(model.StreamEvent{Type: event.Type, Text: event.Delta}); err != nil {
-				return err
-			}
+	if err := forwardStreamDelta(event, onEvent, result); err != nil {
+		return err
+	}
+	if isTerminalStreamEvent(event.Type) {
+		if err := forwardTerminalStreamEvent(event.Type, onEvent); err != nil {
+			return err
+		}
+		if len(event.Response) > 0 {
+			result.body = append([]byte(nil), event.Response...)
 		}
 	}
-	if isTerminalStreamEvent(event.Type) && len(event.Response) > 0 {
-		result.body = append([]byte(nil), event.Response...)
-	}
 	return nil
+}
+
+func forwardStreamDelta(event streamEvent, onEvent func(model.StreamEvent) error, result *streamReadResult) error {
+	if event.Delta == "" {
+		return nil
+	}
+	result.text += event.Delta
+	if onEvent == nil {
+		return nil
+	}
+	return onEvent(model.StreamEvent{Type: event.Type, Text: event.Delta})
+}
+
+func forwardTerminalStreamEvent(eventType string, onEvent func(model.StreamEvent) error) error {
+	if onEvent == nil {
+		return nil
+	}
+	return onEvent(model.StreamEvent{Type: eventType})
 }
 
 type streamEvent struct {
@@ -388,6 +424,7 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 	for name, value := range client.profile.Headers {
 		httpRequest.Header.Set(name, value)
 	}
+	client.debug("raw_model_request", slog.String("request_id", clientRequestID), slog.String("body", string(body)))
 	httpResponse, err := client.httpClient.Do(httpRequest)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -400,7 +437,14 @@ func (client *Client) executeOnce(ctx context.Context, body []byte, reservedToke
 	if err != nil {
 		return httpResult{}, apperr.Wrap(apperr.KindBackend, "modelhttp.read", err)
 	}
+	client.debug("raw_model_response", slog.String("request_id", clientRequestID), slog.Int("status", httpResponse.StatusCode), slog.String("body", string(responseBody)))
 	return httpResult{statusCode: httpResponse.StatusCode, headers: httpResponse.Header, body: responseBody, clientRequestID: clientRequestID}, nil
+}
+
+func (client *Client) debug(message string, attributes ...slog.Attr) {
+	if client.debugLogger != nil {
+		client.debugLogger.LogAttrs(context.Background(), slog.LevelDebug, message, attributes...)
+	}
 }
 
 func defaultRateLimit(configuration config.RateLimitConfig) RateLimitPolicy {
@@ -626,6 +670,7 @@ func (client *Client) normalizeResponse(ctx context.Context, requestBody, respon
 			response.ToolCalls = append(response.ToolCalls, model.ToolCall{CallID: item.CallID, Name: name, Arguments: item.Arguments})
 		}
 	}
+	response.Text = model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
 	response.Usage = client.estimateUsage(ctx, requestBody, []byte(response.Text))
 	if wire.Usage != nil {
 		input := wire.Usage.InputTokens

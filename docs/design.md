@@ -172,11 +172,11 @@ The context builder creates bounded, relevant input for the model. It may combin
 - Existing documentation and project instructions.
 - Results from approved inspection or validation tools.
 
-Context selection should be explicit and inspectable. The builder must avoid sending secrets, unnecessarily large files, ignored artifacts, or unrelated repository content. It must enforce an input-token budget before a request is sent.
+Context selection should be explicit and inspectable. The builder emits typed context events incrementally for history, the current prompt, selected files, repository status/listing, and instruction chunks; request assembly consumes the stream while applying token priorities. The model request is materialized only at the provider boundary. The builder must avoid sending secrets, unnecessarily large files, ignored artifacts, or unrelated repository content and propagate cancellation through event production. It must enforce an input-token budget before a request is sent.
 
 When session history is trimmed to fit the input budget, function-call and function-call-output items must be removed as an atomic pair. Resumed history must discard orphaned or incomplete tool items before a provider request so the Responses API never receives a function output without its matching call.
 
-Repository guidance discovery is an explicit allowlist. It reads `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
+Repository guidance discovery is an explicit allowlist. It reads global `~/.doit/instructions.md`, `~/.doit/instructions/*.md`, and `~/.doit/skills/*/SKILL.md` first, then project `.github/copilot-instructions.md`, `AGENTS.md`, `.github/instructions/*.instructions.md`, `.github/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md`. Guidance is sorted, individually bounded, and capped in aggregate; project guidance is later and can refine global guidance. Other `.doit` contents, including sessions and configuration, remain excluded unless a user explicitly requests them through a separate tool.
 
 #### Session Context and History Retrieval
 
@@ -186,7 +186,9 @@ Session context uses three independent bounds:
 - `max_session_tokens` sets a cumulative model-usage threshold for the session. It includes finalized input and output usage for every model round, including follow-up rounds after tool calls. Reaching the threshold emits a session diagnostic and keeps the model informed that context is bounded; it does not terminate an otherwise valid tool loop. The hard execution bounds remain the per-request input budget, maximum round count, caller deadline, tool limits, and cancellation.
 - Session transcript limits bound durable event size and model-visible history results. A bounded event is not permission to return an unbounded collection of events.
 
-The default request context contains a recent coherent history window. Older history is available through a dedicated read-only model tool named `session.history`; it must not be exposed through `fs.read` or by allowing the model to read `.doit/sessions/` directly.
+Every model round also records the estimated token count of the complete serialized canonical request after context fitting, provider-reported input tokens when available, output token count and provenance, and request wall-clock duration. Provider counts remain distinct from local estimates. Request-wall-clock throughput includes context processing, client pacing/retries, and provider latency; it is operational end-to-end speed, not provider decode speed. Generation tokens/sec is emitted only when streaming exposes both the first output delta and terminal completion; non-streaming generation rate remains unknown. Human progress replaces the active marker with the current step's compact metrics. Completion reports average context tokens per step, average generation TPS over streamed/measurable steps, and average request-wall TPS over all measured steps. Detailed per-step measurements remain in JSON outcomes and durable session results.
+
+The default request context contains a recent coherent exact history window. On resume, older public turns are compacted into bounded chronological segment summaries, recursively rolled up for long sessions, plus a small bounded set of verbatim tool arguments and critical result fields such as paths, hashes, commands, diagnostics, and validation outcomes. During live context fitting, removed older turns and tool pairs are folded into this bounded rolling memory before the next request. This rolling extractive memory is lossy and is rebuilt from the latest request context and subsequent public events; it does not replace the durable transcript. A token-priority fitter drops automatic workspace context first, then initial compact memory, then older conversation items, while preserving rolling summaries, explicit selected files, the current prompt, and function-call/output pairs whenever the budget permits. Older history remains available through a dedicated read-only model tool named `session.history`; it must not be exposed through `fs.read` or by allowing the model to read `.doit/sessions/` directly.
 
 `session.history` is scoped to the active session established by the orchestrator. The model may provide:
 
@@ -195,13 +197,15 @@ The default request context contains a recent coherent history window. Older his
 - Optional `after_sequence` and `before_sequence` cursors.
 - `max_events` and `max_bytes` limits subject to server-side maxima.
 
-The result contains event sequence, type, timestamp, bounded public content, and a truncation or continuation cursor. It never accepts an arbitrary session ID and never returns continuation state, hidden reasoning, credentials, environment values, unredacted file contents, or events from another workspace. Every history result is counted as input on the next model request.
+The result contains event sequence, type, timestamp, a concise searchable event summary, bounded public content, and a truncation or continuation cursor. Text queries match event summaries and bounded original content. It never accepts an arbitrary session ID and never returns continuation state, hidden reasoning, credentials, environment values, unredacted file contents, or events from another workspace. Every history result is counted as input on the next model request.
 
 The history tool is a retrieval escape hatch, not an instruction to inject the complete transcript into every request. Automatic resume should keep recent coherent turns, while an older decision, validation failure, or tool result is retrieved only when the model asks for it. Remote bridge or Copilot sessions must bind the active session to the authenticated workspace lease before exposing this tool.
 
 ### 4.4 Model Client Adapter
 
 The model layer exposes a provider-neutral interface to the orchestrator. The first adapter should be a direct HTTP adapter for backends that implement the OpenAI Responses API contract. The hosting location and provider name are configuration data, not compile-time dependencies.
+
+If a backend echoes a structured function-call argument as a duplicate JSON object in its public message text, remove that object from the displayed/replayed text only when its compact JSON exactly matches a function call in the same response. Preserve the structured function call and unrelated JSON prose.
 
 The design is based on the [OpenAI API overview](https://developers.openai.com/api/reference/overview) and the [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create). `doit` uses the Responses API as its canonical model surface. It does not require the Realtime or Administration APIs.
 
@@ -494,7 +498,7 @@ The session store should use atomic file replacement for manifests and results, 
 ### 5.1 Interactive Agent Session
 
 1. The user starts `doit` in a workspace.
-2. The CLI loads project instructions and local configuration.
+2. The CLI loads global `~/.doit` instructions, skills, and configuration, then project instructions, skills, and configuration; project values override matching global values.
 3. The user describes a development, review, or testing task.
 4. The agent gathers focused context and explains its next proposed action.
 5. The user approves or rejects requested tools when required.
@@ -531,11 +535,12 @@ The agent should use the repository's existing commands whenever possible. It sh
 Configuration should have predictable precedence:
 
 1. Built-in safe defaults.
-2. Project configuration, when supported.
-3. User configuration.
-4. Environment variables and command-line flags for explicit overrides.
+2. Global `~/.doit/config.json`, when present.
+3. Project `.doit/config.json`, when present; project profile fields override matching global fields.
+4. `DOIT_*` environment variables.
+5. Command-line flags for explicit overrides.
 
-Configuration should cover the workspace path, backend profile, model identifier, approval policy, repository task allowlist, timeouts, output limits, and session storage. Repository tasks are named entries with an executable, argument array, and optional environment allowlist; they are the only process actions exposed to the model. Session configuration should contain:
+Configuration should cover the workspace path, backend profile, model identifier, per-profile token budgets, automatic context policy, tool capability profile, approval policy, repository task allowlist, timeouts, output limits, and session storage. Repository tasks are named entries with an executable, argument array, and optional environment allowlist; they are the only process actions exposed to the model. Per-profile `token` values override the global token budget, while `context` controls automatic guidance, Git status, and workspace listing inclusion. Explicit file paths and tool results remain separate from automatic context policy; `tool_profile` controls model-visible capabilities. Session configuration should contain:
 
 - Whether persistence is durable or ephemeral for the current invocation.
 - Retention and pruning settings for `.doit/sessions/`.

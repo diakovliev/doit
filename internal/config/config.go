@@ -20,6 +20,10 @@ import (
 type BackendProfile struct {
 	APIRoot           string                     `json:"api_root"`
 	Model             string                     `json:"model"`
+	ThinkingEffort    string                     `json:"thinking_effort,omitempty"`
+	ToolProfile       string                     `json:"tool_profile,omitempty"`
+	Token             TokenBudget                `json:"token,omitempty"`
+	Context           ContextPolicy              `json:"context,omitempty"`
 	Streaming         bool                       `json:"streaming,omitempty"`
 	APIKeyEnv         string                     `json:"api_key_env,omitempty"`
 	Headers           map[string]string          `json:"headers,omitempty"`
@@ -42,6 +46,20 @@ type TokenBudget struct {
 	MaxInputTokens   int `json:"max_input_tokens"`
 	MaxOutputTokens  int `json:"max_output_tokens"`
 	MaxSessionTokens int `json:"max_session_tokens"`
+}
+
+// ContextPolicy controls which repository material is included automatically.
+type ContextPolicy struct {
+	IncludeGuidance         *bool `json:"include_guidance,omitempty"`
+	IncludeGitStatus        *bool `json:"include_git_status,omitempty"`
+	IncludeWorkspaceListing *bool `json:"include_workspace_listing,omitempty"`
+}
+
+// EffectiveContextPolicy contains resolved automatic-context settings.
+type EffectiveContextPolicy struct {
+	IncludeGuidance         bool
+	IncludeGitStatus        bool
+	IncludeWorkspaceListing bool
 }
 
 // ExecutionConfig controls model, agent, and configured-process execution limits.
@@ -88,15 +106,54 @@ type Config struct {
 	Token       TokenBudget                `json:"token"`
 }
 
+// EffectiveTokenBudget resolves profile-specific limits over global defaults.
+func (configuration Config) EffectiveTokenBudget(profile BackendProfile) TokenBudget {
+	budget := configuration.Token
+	if profile.Token.MaxInputTokens > 0 {
+		budget.MaxInputTokens = profile.Token.MaxInputTokens
+	}
+	if profile.Token.MaxOutputTokens > 0 {
+		budget.MaxOutputTokens = profile.Token.MaxOutputTokens
+	}
+	if profile.Token.MaxSessionTokens > 0 {
+		budget.MaxSessionTokens = profile.Token.MaxSessionTokens
+	}
+	return budget
+}
+
+// EffectiveContextPolicy resolves profile-specific automatic-context settings.
+func (configuration Config) EffectiveContextPolicy(profile BackendProfile) EffectiveContextPolicy {
+	policy := EffectiveContextPolicy{IncludeGuidance: true, IncludeGitStatus: true, IncludeWorkspaceListing: true}
+	if profile.Context.IncludeGuidance != nil {
+		policy.IncludeGuidance = *profile.Context.IncludeGuidance
+	}
+	if profile.Context.IncludeGitStatus != nil {
+		policy.IncludeGitStatus = *profile.Context.IncludeGitStatus
+	}
+	if profile.Context.IncludeWorkspaceListing != nil {
+		policy.IncludeWorkspaceListing = *profile.Context.IncludeWorkspaceListing
+	}
+	return policy
+}
+
+// EffectiveToolProfile resolves the profile-specific tool profile over the global setting.
+func (configuration Config) EffectiveToolProfile(profile BackendProfile) string {
+	if profile.ToolProfile != "" {
+		return profile.ToolProfile
+	}
+	return configuration.ToolProfile
+}
+
 // Overrides are values supplied by environment variables or CLI flags.
 type Overrides struct {
-	Profile   string
-	Model     string
-	APIRoot   string
-	APIKeyEnv string
-	Format    string
-	Verbose   bool
-	Ephemeral *bool
+	Profile        string
+	Model          string
+	ThinkingEffort string
+	APIRoot        string
+	APIKeyEnv      string
+	Format         string
+	Verbose        bool
+	Ephemeral      *bool
 }
 
 // LoadOptions controls configuration source locations and overrides.
@@ -207,7 +264,7 @@ func applyConfigFiles(result *Config, options LoadOptions, workspace string) err
 	if userFile == "" {
 		userFile = defaultUserConfigFile()
 	}
-	for _, filePath := range []string{projectFile, userFile} {
+	for _, filePath := range []string{userFile, projectFile} {
 		loaded, err := readFileConfig(filePath)
 		if err != nil {
 			return err
@@ -325,8 +382,7 @@ func applyFileValues(result *Config, loaded fileConfig) {
 		result.ToolProfile = loaded.ToolProfile
 	}
 	for name, profile := range loaded.Profiles {
-		profile.APIRoot = strings.TrimRight(profile.APIRoot, "/")
-		result.Profiles[name] = profile
+		result.Profiles[name] = mergeBackendProfile(result.Profiles[name], profile)
 	}
 	for name, task := range loaded.Tasks {
 		result.Tasks[name] = task
@@ -344,9 +400,115 @@ func applyFileValues(result *Config, loaded fileConfig) {
 
 func applyFileProfiles(result *Config, profiles map[string]BackendProfile) {
 	for name, profile := range profiles {
-		profile.APIRoot = strings.TrimRight(profile.APIRoot, "/")
-		result.Profiles[name] = profile
+		result.Profiles[name] = mergeBackendProfile(result.Profiles[name], profile)
 	}
+}
+
+func mergeBackendProfile(base, override BackendProfile) BackendProfile {
+	merged := base
+	if override.APIRoot != "" {
+		merged.APIRoot = strings.TrimRight(override.APIRoot, "/")
+	}
+	if override.Model != "" {
+		merged.Model = override.Model
+	}
+	if override.ThinkingEffort != "" {
+		merged.ThinkingEffort = override.ThinkingEffort
+	}
+	if override.ToolProfile != "" {
+		merged.ToolProfile = override.ToolProfile
+	}
+	merged.Token = mergeTokenBudget(merged.Token, override.Token)
+	merged.Context = mergeContextPolicy(merged.Context, override.Context)
+	if override.Streaming {
+		merged.Streaming = true
+	}
+	if override.APIKeyEnv != "" {
+		merged.APIKeyEnv = override.APIKeyEnv
+	}
+	merged.Headers = mergeStringMap(merged.Headers, override.Headers)
+	merged.RequestParameters = mergeRawMessageMap(merged.RequestParameters, override.RequestParameters)
+	merged.RateLimit = mergeRateLimit(merged.RateLimit, override.RateLimit)
+	return merged
+}
+
+func mergeTokenBudget(base, override TokenBudget) TokenBudget {
+	if override.MaxInputTokens > 0 {
+		base.MaxInputTokens = override.MaxInputTokens
+	}
+	if override.MaxOutputTokens > 0 {
+		base.MaxOutputTokens = override.MaxOutputTokens
+	}
+	if override.MaxSessionTokens > 0 {
+		base.MaxSessionTokens = override.MaxSessionTokens
+	}
+	return base
+}
+
+func mergeContextPolicy(base, override ContextPolicy) ContextPolicy {
+	if override.IncludeGuidance != nil {
+		value := *override.IncludeGuidance
+		base.IncludeGuidance = &value
+	}
+	if override.IncludeGitStatus != nil {
+		value := *override.IncludeGitStatus
+		base.IncludeGitStatus = &value
+	}
+	if override.IncludeWorkspaceListing != nil {
+		value := *override.IncludeWorkspaceListing
+		base.IncludeWorkspaceListing = &value
+	}
+	return base
+}
+
+func mergeStringMap(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
+}
+
+func mergeRawMessageMap(base, override map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]json.RawMessage, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = append(json.RawMessage(nil), value...)
+	}
+	for key, value := range override {
+		merged[key] = append(json.RawMessage(nil), value...)
+	}
+	return merged
+}
+
+func mergeRateLimit(base, override RateLimitConfig) RateLimitConfig {
+	if override.MaxRetries > 0 {
+		base.MaxRetries = override.MaxRetries
+	}
+	if override.InitialBackoffMs > 0 {
+		base.InitialBackoffMs = override.InitialBackoffMs
+	}
+	if override.MaxBackoffMs > 0 {
+		base.MaxBackoffMs = override.MaxBackoffMs
+	}
+	if override.MinIntervalMs > 0 {
+		base.MinIntervalMs = override.MinIntervalMs
+	}
+	if override.TokensPerMinute > 0 {
+		base.TokensPerMinute = override.TokensPerMinute
+	}
+	if override.RequestsPerMinute > 0 {
+		base.RequestsPerMinute = override.RequestsPerMinute
+	}
+	return base
 }
 
 func applyFileTasks(result *Config, tasks map[string]TaskConfig) {
@@ -503,9 +665,20 @@ func applyOverrides(result *Config, overrides Overrides) {
 	if overrides.Profile != "" {
 		result.Profile = overrides.Profile
 	}
+	applyProfileOverrides(result, overrides)
+	applyOutputOverrides(result, overrides)
+	if overrides.Ephemeral != nil {
+		result.Ephemeral = *overrides.Ephemeral
+	}
+}
+
+func applyProfileOverrides(result *Config, overrides Overrides) {
 	profile := result.Profiles[result.Profile]
 	if overrides.Model != "" {
 		profile.Model = overrides.Model
+	}
+	if overrides.ThinkingEffort != "" {
+		profile.ThinkingEffort = overrides.ThinkingEffort
 	}
 	if overrides.APIRoot != "" {
 		profile.APIRoot = strings.TrimRight(overrides.APIRoot, "/")
@@ -513,12 +686,8 @@ func applyOverrides(result *Config, overrides Overrides) {
 	if overrides.APIKeyEnv != "" {
 		profile.APIKeyEnv = overrides.APIKeyEnv
 	}
-	if overrides.Model != "" || overrides.APIRoot != "" || overrides.APIKeyEnv != "" {
+	if overrides.Model != "" || overrides.ThinkingEffort != "" || overrides.APIRoot != "" || overrides.APIKeyEnv != "" {
 		result.Profiles[result.Profile] = profile
-	}
-	applyOutputOverrides(result, overrides)
-	if overrides.Ephemeral != nil {
-		result.Ephemeral = *overrides.Ephemeral
 	}
 }
 
@@ -552,11 +721,11 @@ func applyEnvironmentProfileValues(result *Config, environment map[string]string
 }
 
 func defaultUserConfigFile() string {
-	configDirectory, err := os.UserConfigDir()
+	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(configDirectory, "doit", "config.json")
+	return filepath.Join(homeDirectory, ".doit", "config.json")
 }
 
 func environmentMap() map[string]string {

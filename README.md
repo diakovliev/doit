@@ -106,6 +106,7 @@ Implemented command paths:
 | Command | Purpose |
 | --- | --- |
 | `doit init` | Create project-local `.doit` configuration, instruction, and skill templates without contacting a model. Existing files are preserved. |
+| `doit init --global` | Create the global `~/.doit` configuration, instruction, and skill templates. Existing files are preserved. `doit --global init` is also accepted. |
 | `doit` | Start the default agent request flow. |
 | `doit agent` | Run an agent request, reading a prompt from stdin when no prompt argument is supplied. |
 | `doit run <request>` | Run one development-oriented request and exit. |
@@ -115,7 +116,7 @@ Implemented command paths:
 | `doit status` | Report the effective workspace, selected profiles, and Git state. |
 | `doit model test` | Send a minimal request to the selected backend and report normalized response metadata. |
 | `doit config list` | Print the effective non-secret configuration. |
-| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. |
+| `doit session list;inspect;export;resume;prune` | Inspect, resume, export, or prune project-local sessions. `session inspect` shows the latest completed session by default; pass an ID to inspect a specific session. Human output is the default; use `--format md` for structured Markdown or `--format json` for machine-readable output. |
 | `doit doctor` | Run local workspace, configuration, and profile diagnostics. |
 | `doit --help` | Print CLI usage. Put `--help` before the command. |
 | `doit --version` | Print the CLI version. |
@@ -128,9 +129,10 @@ Initialize a workspace before adding project-specific guidance:
 ```powershell
 doit init
 doit -C .\sample init
+doit init --global
 ```
 
-The command creates `.doit/config.json`, `.doit/instructions.md`, instruction and skill README files, and an example skill template. It never overwrites an existing scaffold file, so it can be run again after the project has been customized.
+The project command creates `.doit/config.json`, `.doit/instructions.md`, instruction and skill README files, and an example skill template. `doit init --global` creates the equivalent files below `~/.doit` for user-wide defaults. Neither command overwrites an existing scaffold file, so both can be run again after customization.
 
 ## Global Options
 
@@ -139,14 +141,17 @@ The command creates `.doit/config.json`, `.doit/instructions.md`, instruction an
 | `-C, --directory <path>` | Use another workspace directory. | `doit -C .\sample --profile ollama run "Inspect this project"` |
 | `-p, --profile <name>` | Select a named backend profile. | `doit --profile foundry_deepseek run "Review the code"` |
 | `-m, --model <id>` | Override the profile's model identifier. | `doit --profile ollama --model <model-id> run "Explain the project entrypoint"` |
+| `--thinking-effort <value>` | Override the model's reasoning effort for this invocation. The value is passed through to the backend. | `doit --thinking-effort high run "Review the code"` |
 | `--format human` | Print progress and a human result. | `doit --format human run "Summarize"` |
 | `--format json` | Print one machine-readable result object. | `doit --format json run "Summarize"` |
+| `--format md` / `--format markdown` | Print structured Markdown where supported, including session inspection. | `doit --format md session inspect` |
 | `--ephemeral` | Keep the session in memory and do not persist it. | `doit --ephemeral run "Inspect only"` |
 | `--new-session` / `--no-resume` | Start a fresh durable session instead of reusing the latest one. | `doit --new-session run "Start a separate review"` |
 | `--timeout <duration>` | Set the request context deadline. | `doit --timeout 10m run "Review the repository"` |
 | `--no-color` | Disable terminal styling. | `doit --no-color run "Summarize"` |
 | `--quiet` | Reserved output-control flag (currently non-functional). | `doit --quiet run "Summarize"` |
 | `--verbose` | Show bounded public model diagnostics and text explicitly returned by the model, including response IDs, statuses, usage, and stream event types. Hidden reasoning is never printed. | `doit --verbose run "Summarize"` |
+| `--debug` | Write raw model requests/responses, SSE frames, and tool calls/results as JSONL to stderr. This can include prompts and tool data; keep logs private. Authorization headers are never logged. | `doit --debug run "Inspect the changes"` |
 
 Use `--` when you need to terminate global option parsing before arguments:
 
@@ -156,7 +161,7 @@ doit --profile ollama run -- "Explain the files under internal."
 
 ## Backend Configuration
 
-Project configuration is stored in `.doit/config.json`. Keep credentials out of this file.
+Global user configuration is stored in `~/.doit/config.json`; project configuration is stored in `.doit/config.json`. The global `.doit/instructions.md`, `.doit/instructions/*.md`, and `.doit/skills/*/SKILL.md` files are loaded before project-specific guidance and skills. Project settings and guidance can override or refine global defaults. Keep credentials out of both configuration files.
 
 A local Ollama profile can look like this:
 
@@ -195,8 +200,20 @@ Provider-specific request parameters can be configured under a backend profile. 
     "reasoning-model": {
       "api_root": "https://example.test/v1",
       "model": "<model-id>",
+      "thinking_effort": "medium",
+      "tool_profile": "inspect",
+      "token": {
+        "max_input_tokens": 12000,
+        "max_output_tokens": 3000,
+        "max_session_tokens": 24000
+      },
+      "context": {
+        "include_guidance": true,
+        "include_git_status": false,
+        "include_workspace_listing": true
+      },
       "request_parameters": {
-        "reasoning": {"effort": "high"}
+        "reasoning": {"summary": "auto"}
       }
     }
   }
@@ -204,6 +221,16 @@ Provider-specific request parameters can be configured under a backend profile. 
 ```
 
 These values are merged into every provider request. Core fields such as `model`, `input`, `tools`, `stream`, and `max_output_tokens` cannot be overridden. Unsupported parameters remain the backend's responsibility and may be rejected by the provider.
+
+`thinking_effort` is a convenience setting for the provider's `reasoning.effort` value. The `--thinking-effort` option takes precedence over the profile setting. For embedding callers, `agent.Task.ThinkingEffortForRound` can return a different value before each model/tool round, allowing effort to change during an active task without restarting the session. A request-level value overrides the configured reasoning effort while preserving other configured reasoning fields.
+
+The optional profile `token` object overrides the global token budget for that model. `max_input_tokens` bounds each model context window, `max_output_tokens` bounds each response, and `max_session_tokens` is the cumulative session threshold. Unspecified profile values inherit the global `token` settings.
+
+The optional profile `context` object controls material included automatically in each request. Guidance, Git status, and the bounded workspace listing can each be disabled. Explicit paths and model tool results remain separate from this automatic context policy. `tool_profile` controls which capabilities are exposed to the model, such as `inspect`, `small-edit`, `validate`, or `full`; disabling automatic context does not grant access to tools that the selected tool profile excludes.
+
+Each model round reports the token estimate for the complete serialized request context (instructions, tools, history, current input, and results), provider-reported input tokens when available, output tokens and their source, elapsed request time, request-wall-clock throughput, and accumulated tool-call latency. In human mode, the current step's compact metrics replace the active progress line. On completion, output includes average context tokens and tool latency per step, average generation TPS across streamed steps only, and average request-wall TPS across all measured steps. Provider counts are marked `provider`; fallback counts use the local byte estimator and are marked `local-estimate`. Generation tokens/sec is reported only for streamed responses, measured from the first output delta to the terminal event; non-streamed responses show it as unknown because their generation interval is not observable. Request-wall-clock throughput includes context processing, provider/queue latency, and client-side rate waiting, so it is not a hardware generation-speed measurement. Detailed metrics appear in JSON outcomes and persisted session inspection.
+
+The model can also request a temporary effort change with the read-only `agent.set_thinking_effort` tool. It accepts `low`, `medium`, or `high` and applies the selection to the next model round only; the configured baseline is restored afterward. Use `low` for routine steps and escalate only when the next step requires substantial synthesis or careful planning. Invalid effort values are rejected and cannot change the request.
 
 An authenticated Microsoft Foundry profile can look like this:
 
@@ -265,7 +292,7 @@ DOIT_EPHEMERAL
 
 The project configuration may set `tool_profile` to control which capabilities are exposed to the model. Available profiles are `full` (default), `inspect`, `small-edit`, `edit`, `validate`, `git-read`, `git-write`, and `destructive`. `small-edit` exposes read-only inspection plus exact structured edit tools, but not broad patches, process execution, or Git mutation. This controls model-visible tools; workspace confinement and the trusted automation policy still apply.
 
-Configuration precedence is built-in defaults, project configuration, user configuration, `DOIT_*` environment overrides, and command-line flags.
+Configuration precedence is built-in defaults, global `~/.doit/config.json`, project `.doit/config.json`, `DOIT_*` environment overrides, and command-line flags. When a backend profile exists at both levels, project fields override matching global fields while unspecified global fields are preserved.
 
 ## Ollama in Docker
 
@@ -436,7 +463,7 @@ A session can contain:
 - `result.json`
 - `continuation.json`, when provider continuation state is needed
 
-Durable runs automatically reuse the newest completed or failed resumable session below the current workspace. The previous public conversation turns are included in the next model request, while the existing session history and lock remain protected. Use `--new-session` or `--no-resume` to force a new durable session. `--ephemeral` disables persistence and automatic reuse for that invocation.
+Durable runs automatically reuse the newest completed or failed resumable session below the current workspace. Resume keeps a recent exact conversation window and compacts older turns into bounded chronological text summaries plus selected verbatim tool facts such as paths, commands, hashes, and validation results. Long histories are summarized hierarchically. The same memory is updated during live runs whenever token fitting trims older turns or tool pairs. Per-request fitting drops automatic context first, then compact memory before exact recent turns; explicit selected files and the current prompt have higher retention priority. `session.history` can retrieve bounded original public events by query or sequence. Summaries are lossy, so retrieve source events when exact older wording or tool output matters. Use `--new-session` or `--no-resume` to force a new durable session. `--ephemeral` disables persistence and automatic reuse for that invocation.
 
 Use `--ephemeral` for experiments or sensitive requests that should not persist a session. Session data is redacted and bounded before writing. The repository ignores `.doit/sessions/` through `.gitignore`.
 

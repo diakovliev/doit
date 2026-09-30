@@ -1,8 +1,10 @@
 package modelhttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +30,25 @@ func TestClientNormalizesTextFunctionCallsAndProviderUsage(t *testing.T) {
 	}
 	requireNormalizedResponse(t, response)
 	requireProviderUsage(t, response.Usage)
+}
+
+func TestClientStripsToolArgumentsDuplicatedInMessageText(t *testing.T) {
+	client, err := New(config.BackendProfile{APIRoot: "http://localhost/v1", Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	responseBody := []byte(`{"id":"duplicate-tool-text","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"I will inspect docs. { \"path\" : \"docs\" }"}]},{"type":"function_call","call_id":"list-docs","name":"fs.list","arguments":"{\"path\":\"docs\"}"}]}`)
+	response, err := client.normalizeResponse(context.Background(), []byte(`{}`), responseBody, http.Header{}, "request-1", nil)
+	if err != nil {
+		t.Fatalf("normalize duplicate tool text: %v", err)
+	}
+	if response.Text != "I will inspect docs." || len(response.ToolCalls) != 1 || response.ToolCalls[0].Arguments != `{"path":"docs"}` {
+		t.Fatalf("duplicated tool arguments were not filtered safely: %+v", response)
+	}
+	plainJSONResponse, err := client.normalizeResponse(context.Background(), []byte(`{}`), []byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"path\":\"docs\"}"}]}]}`), http.Header{}, "request-2", nil)
+	if err != nil || plainJSONResponse.Text != `{"path":"docs"}` {
+		t.Fatalf("standalone JSON prose was unexpectedly removed: response=%+v error=%v", plainJSONResponse, err)
+	}
 }
 
 func TestClientUsesConfiguredRequestTimeout(t *testing.T) {
@@ -73,6 +94,77 @@ func TestClientSendsConfiguredRequestParameters(t *testing.T) {
 	}
 }
 
+func TestClientDebugTraceLogsBodiesWithoutAuthorizationHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer private-api-key" {
+			http.Error(writer, "authorization missing", http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"debug-response","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+	var trace bytes.Buffer
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{APIKey: "private-api-key", TokenCounter: usage.ByteEstimator{}, DebugLogger: slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatalf("new debug client: %v", err)
+	}
+	if _, err := client.Create(context.Background(), model.Request{Model: "test-model", Input: []model.InputItem{{Type: "message", Role: "user", Content: "trace-prompt-marker"}}}); err != nil {
+		t.Fatalf("create debug request: %v", err)
+	}
+	if !strings.Contains(trace.String(), "raw_model_request") || !strings.Contains(trace.String(), "trace-prompt-marker") || !strings.Contains(trace.String(), "raw_model_response") || strings.Contains(trace.String(), "private-api-key") {
+		t.Fatalf("debug trace did not safely capture raw bodies: %s", trace.String())
+	}
+}
+
+func TestClientDebugTraceLogsRawStreamFrames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"stream-marker\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"trace-stream\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+	var trace bytes.Buffer
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model"}, Options{TokenCounter: usage.ByteEstimator{}, DebugLogger: slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatalf("new debug stream client: %v", err)
+	}
+	if _, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, nil); err != nil {
+		t.Fatalf("create debug stream: %v", err)
+	}
+	if !strings.Contains(trace.String(), "raw_model_stream_event") || !strings.Contains(trace.String(), "stream-marker") || !strings.Contains(trace.String(), "response.completed") {
+		t.Fatalf("debug trace did not capture raw stream frames: %s", trace.String())
+	}
+}
+
+func TestClientRequestThinkingEffortOverridesConfiguredReasoningEffort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			http.Error(writer, "invalid request", http.StatusBadRequest)
+			return
+		}
+		var reasoning struct {
+			Effort  string `json:"effort"`
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal(payload["reasoning"], &reasoning); err != nil || reasoning.Effort != "low" || reasoning.Summary != "auto" {
+			http.Error(writer, "request effort was not overridden", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"effort-response","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+	client, err := New(config.BackendProfile{APIRoot: server.URL, Model: "test-model", RequestParameters: map[string]json.RawMessage{"reasoning": json.RawMessage(`{"effort":"high","summary":"auto"}`)}}, Options{TokenCounter: usage.ByteEstimator{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := client.Create(context.Background(), model.Request{Model: "test-model", ThinkingEffort: "low"}); err != nil {
+		t.Fatalf("create effort response: %v", err)
+	}
+}
+
 func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Accept") != "text/event-stream" {
@@ -90,12 +182,16 @@ func TestClientStreamsTextAndNormalizesTerminalResponse(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	var streamed strings.Builder
+	terminalSeen := false
 	response, err := client.CreateStream(context.Background(), model.Request{Model: "test-model"}, func(event model.StreamEvent) error {
 		streamed.WriteString(event.Text)
+		if event.Type == "response.completed" {
+			terminalSeen = true
+		}
 		return nil
 	})
-	if err != nil || response.ID != "stream-1" || response.Text != "Hello" || streamed.String() != "Hello" {
-		t.Fatalf("unexpected streamed response: %+v streamed=%q error=%v", response, streamed.String(), err)
+	if err != nil || response.ID != "stream-1" || response.Text != "Hello" || streamed.String() != "Hello" || !terminalSeen {
+		t.Fatalf("unexpected streamed response: %+v streamed=%q terminal=%t error=%v", response, streamed.String(), terminalSeen, err)
 	}
 }
 

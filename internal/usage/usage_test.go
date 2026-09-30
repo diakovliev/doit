@@ -47,6 +47,19 @@ func TestAddPreservesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestSummarizeStepsSeparatesGenerationAndRequestAverages(t *testing.T) {
+	firstGeneration := 10.0
+	secondGeneration := 30.0
+	summary := SummarizeSteps([]StepMetrics{
+		{ContextTokens: 100, RequestWallClockTokensPerSecond: 20, OutputTokensPerSecond: &firstGeneration},
+		{ContextTokens: 200, RequestWallClockTokensPerSecond: 40, OutputTokensPerSecond: &secondGeneration},
+		{ContextTokens: 300, RequestWallClockTokensPerSecond: 100},
+	})
+	if summary.Steps != 3 || summary.AverageContextTokens != 200 || summary.GenerationMeasuredSteps != 2 || summary.AverageGenerationTokensPerSec == nil || *summary.AverageGenerationTokensPerSec != 20 || summary.AverageRequestTokensPerSecond != 160.0/3.0 {
+		t.Fatalf("unexpected metric averages: %+v", summary)
+	}
+}
+
 func TestByteEstimatorHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/diakovliev/doit/internal/apperr"
 	contextdata "github.com/diakovliev/doit/internal/contextbuilder"
@@ -24,6 +27,8 @@ const defaultMaxRounds = 128
 
 const maxVerbosePublicText = 240
 
+const thinkingEffortToolName = "agent.set_thinking_effort"
+
 // ApprovalFunc handles confirmation-required tool actions.
 type ApprovalFunc func(context.Context, policy.Action, tools.Call) (bool, error)
 
@@ -40,44 +45,51 @@ type ProgressFunc func(ProgressEvent)
 
 // Task describes one model-assisted request.
 type Task struct {
-	Command             string
-	Request             string
-	Instructions        string
-	Paths               []string
-	Workspace           string
-	Profile             string
-	Model               string
-	MaxInputTokens      int
-	MaxOutputTokens     int
-	MaxSessionTokens    int
-	NonInteractive      bool
-	WorkspaceAutomation bool
-	NewSession          bool
-	SessionID           string
+	Command                string
+	Request                string
+	Instructions           string
+	Paths                  []string
+	Workspace              string
+	Profile                string
+	Model                  string
+	ThinkingEffort         string
+	ThinkingEffortForRound func(int) string
+	ContextPolicy          *contextdata.Policy
+	MaxInputTokens         int
+	MaxOutputTokens        int
+	MaxSessionTokens       int
+	NonInteractive         bool
+	WorkspaceAutomation    bool
+	NewSession             bool
+	SessionID              string
 }
 
 // Outcome is the final normalized task result.
 type Outcome struct {
-	SessionID    session.ID
-	Text         string
-	Usage        usage.Counts
-	ChangedPaths []string
-	ChangeSets   []tools.ChangeSet
-	Validations  []session.Validation
+	SessionID          session.ID           `json:"session_id"`
+	Text               string               `json:"text"`
+	Usage              usage.Counts         `json:"usage"`
+	Steps              []usage.StepMetrics  `json:"steps,omitempty"`
+	StepSummary        usage.StepSummary    `json:"step_summary"`
+	ContextTokensTotal int64                `json:"context_tokens_total"`
+	ChangedPaths       []string             `json:"changed_paths,omitempty"`
+	ChangeSets         []tools.ChangeSet    `json:"change_sets,omitempty"`
+	Validations        []session.Validation `json:"validations,omitempty"`
 }
 
 // Runner coordinates one task.
 type Runner struct {
-	Client    model.ModelClient
-	Context   *contextdata.Builder
-	Tools     *tools.Registry
-	Policy    policy.ApprovalPolicy
-	Sessions  session.Store
-	Approve   ApprovalFunc
-	MaxRounds int
-	Progress  ProgressFunc
-	Streaming bool
-	Verbose   bool
+	Client      model.ModelClient
+	Context     *contextdata.Builder
+	Tools       *tools.Registry
+	Policy      policy.ApprovalPolicy
+	Sessions    session.Store
+	Approve     ApprovalFunc
+	MaxRounds   int
+	Progress    ProgressFunc
+	DebugLogger *slog.Logger
+	Streaming   bool
+	Verbose     bool
 }
 
 // Run executes a model/tool loop and persists its lifecycle events.
@@ -109,7 +121,7 @@ func (runner *Runner) Run(ctx context.Context, task Task) (Outcome, error) {
 		return Outcome{SessionID: sessionID}, err
 	}
 	runner.emit(ProgressEvent{Phase: "context", Message: "bounded context prepared"})
-	return runner.loop(ctx, sessionID, request, initialUsage, task.MaxInputTokens, task.MaxSessionTokens, task.NonInteractive, task.WorkspaceAutomation)
+	return runner.loop(ctx, sessionID, request, initialUsage, task.MaxInputTokens, task.MaxSessionTokens, task.NonInteractive, task.WorkspaceAutomation, task.ThinkingEffortForRound)
 }
 
 func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata, newSession bool) (session.ID, bool, error) {
@@ -131,54 +143,175 @@ func (runner *Runner) openSession(ctx context.Context, metadata session.Metadata
 	return startedID, false, err
 }
 
-func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool) (Outcome, error) {
-	totalUsage := initialUsage
-	changedPaths := make([]string, 0)
-	changeSets := make([]tools.ChangeSet, 0)
-	validations := make([]session.Validation, 0)
+func (runner *Runner) loop(ctx context.Context, sessionID session.ID, request model.Request, initialUsage usage.Counts, maxInputTokens int, maxSessionTokens int, nonInteractive bool, workspaceAutomation bool, thinkingEffortForRound func(int) string) (Outcome, error) {
+	defaultThinkingEffort := request.ThinkingEffort
+	state := loopState{sessionID: sessionID, totalUsage: initialUsage}
 	budgetNotified := false
 	maxRounds := runner.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = defaultMaxRounds
 	}
 	for round := range maxRounds {
-		response, requestErr := runner.requestRound(ctx, &request, maxInputTokens, maxSessionTokens, usageValue(totalUsage.TotalTokens), &budgetNotified, round)
+		response, step, requestErr := runner.requestRound(ctx, &request, defaultThinkingEffort, maxInputTokens, maxSessionTokens, usageValue(state.totalUsage.TotalTokens), &budgetNotified, round, thinkingEffortForRound)
 		if requestErr != nil {
-			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSessionWithUsage(ctx, sessionID, requestErr, totalUsage)
+			if step.ContextTokens > 0 || step.RequestDurationMs > 0 {
+				if err := runner.recordStepMetrics(ctx, sessionID, step); err != nil {
+					return Outcome{SessionID: sessionID, Usage: state.totalUsage}, err
+				}
+			}
+			return Outcome{SessionID: sessionID, Usage: state.totalUsage}, runner.failSessionWithUsage(ctx, sessionID, requestErr, state.totalUsage)
 		}
-		outcome, done, err := runner.processResponse(ctx, sessionID, response, &totalUsage, changedPaths, changeSets, validations, round == 0, initialUsage)
+		state.steps = append(state.steps, step)
+		state.contextTokensTotal += step.ContextTokens
+		if err := runner.recordStepMetrics(ctx, sessionID, step); err != nil {
+			return Outcome{SessionID: sessionID, Usage: state.totalUsage}, err
+		}
+		outcome, done, err := runner.processRound(ctx, &state, &request, response, round, initialUsage, nonInteractive, workspaceAutomation)
 		if err != nil {
-			return Outcome{SessionID: sessionID, Usage: totalUsage}, err
+			return Outcome{SessionID: sessionID, Usage: state.totalUsage}, err
 		}
 		if done {
 			runner.emit(ProgressEvent{Phase: "session", Message: "task completed"})
 			return outcome, nil
 		}
-		if err := runner.handleToolCalls(ctx, sessionID, &request, response.ToolCalls, &changedPaths, &changeSets, &validations, nonInteractive, workspaceAutomation); err != nil {
-			return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
-		}
 	}
 	err := apperr.New(apperr.KindTool, "agent.run", "maximum model/tool rounds exceeded")
-	return Outcome{SessionID: sessionID, Usage: totalUsage}, runner.failSession(ctx, sessionID, err)
+	return Outcome{SessionID: sessionID, Usage: state.totalUsage}, runner.failSession(ctx, sessionID, err)
 }
 
-func (runner *Runner) requestRound(ctx context.Context, request *model.Request, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int) (model.Response, error) {
-	if _, fitErr := runner.Context.FitRequest(ctx, request, maxInputTokens); fitErr != nil {
-		return model.Response{}, fitErr
+type loopState struct {
+	sessionID          session.ID
+	totalUsage         usage.Counts
+	changedPaths       []string
+	changeSets         []tools.ChangeSet
+	validations        []session.Validation
+	steps              []usage.StepMetrics
+	contextTokensTotal int64
+}
+
+func (runner *Runner) processRound(ctx context.Context, state *loopState, request *model.Request, response model.Response, round int, initialUsage usage.Counts, nonInteractive, workspaceAutomation bool) (Outcome, bool, error) {
+	outcome, done, err := runner.processResponse(ctx, state.sessionID, response, &state.totalUsage, state.changedPaths, state.changeSets, state.validations, round == 0, initialUsage, state.steps, state.contextTokensTotal)
+	if err != nil || done {
+		return outcome, done, err
 	}
-	if maxSessionTokens > 0 && usedSessionTokens >= int64(maxSessionTokens) && !*budgetNotified {
-		runner.emit(ProgressEvent{Phase: "session", Message: "session usage threshold reached; continuing with bounded context and session.history"})
-		*budgetNotified = true
+	step := &state.steps[len(state.steps)-1]
+	toolErr := runner.handleToolCalls(ctx, state.sessionID, request, response.ToolCalls, step, &state.changedPaths, &state.changeSets, &state.validations, nonInteractive, workspaceAutomation)
+	if step.ToolCalls > 0 {
+		if err := runner.appendEvent(ctx, state.sessionID, "step_tool_metrics", step); err != nil {
+			return Outcome{SessionID: state.sessionID, Usage: state.totalUsage}, false, err
+		}
+		runner.emit(ProgressEvent{Phase: "metrics", Message: stepMetricsMessage(*step), Round: round + 1})
 	}
+	if toolErr != nil {
+		return Outcome{SessionID: state.sessionID, Usage: state.totalUsage}, false, runner.failSession(ctx, state.sessionID, toolErr)
+	}
+	return outcome, false, nil
+}
+
+func (runner *Runner) requestRound(ctx context.Context, request *model.Request, defaultThinkingEffort string, maxInputTokens, maxSessionTokens int, usedSessionTokens int64, budgetNotified *bool, round int, thinkingEffortForRound func(int) string) (model.Response, usage.StepMetrics, error) {
+	applyRoundThinkingEffort(request, round, thinkingEffortForRound)
+	defer func() { request.ThinkingEffort = defaultThinkingEffort }()
+	contextUsage, fitErr := runner.Context.FitRequest(ctx, request, maxInputTokens)
+	if fitErr != nil {
+		return model.Response{}, usage.StepMetrics{Round: round + 1}, fitErr
+	}
+	runner.reportSessionThreshold(maxSessionTokens, usedSessionTokens, budgetNotified)
+	runner.emit(ProgressEvent{Phase: "model", Message: roundProgressMessage(round), Round: round + 1})
+	startedAt := time.Now()
+	response, err := runner.createResponse(ctx, *request)
+	return response, buildStepMetrics(ctx, round+1, usageValue(contextUsage.InputTokens), contextUsage.Source, response, time.Since(startedAt)), err
+}
+
+func applyRoundThinkingEffort(request *model.Request, round int, choose func(int) string) {
+	if choose == nil {
+		return
+	}
+	if effort := choose(round); effort != "" {
+		request.ThinkingEffort = effort
+	}
+}
+
+func (runner *Runner) reportSessionThreshold(maxSessionTokens int, usedSessionTokens int64, notified *bool) {
+	if maxSessionTokens <= 0 || usedSessionTokens < int64(maxSessionTokens) || *notified {
+		return
+	}
+	runner.emit(ProgressEvent{Phase: "session", Message: "session usage threshold reached; continuing with bounded context and session.history"})
+	*notified = true
+}
+
+func roundProgressMessage(round int) string {
 	message := "thinking about the next action"
 	if round > 0 {
 		message = "thinking after tool results"
 	}
-	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("%s (round %d)", message, round+1), Round: round + 1})
-	return runner.createResponse(ctx, *request)
+	return fmt.Sprintf("%s (round %d)", message, round+1)
 }
 
-func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts) (Outcome, bool, error) {
+func buildStepMetrics(ctx context.Context, round int, contextTokens int64, contextSource usage.Source, response model.Response, requestDuration time.Duration) usage.StepMetrics {
+	outputTokens, outputSource := roundOutputTokens(ctx, response)
+	providerInputTokens := cloneTokenCount(response.Usage.InputTokens)
+	if response.Usage.OutputTokens != nil {
+		outputTokens = *response.Usage.OutputTokens
+		outputSource = response.Usage.Source
+	}
+	metrics := usage.StepMetrics{Round: round, ContextTokens: contextTokens, ContextSource: contextSource, ProviderInputTokens: providerInputTokens, OutputTokens: outputTokens, OutputSource: outputSource, RequestDurationMs: requestDuration.Milliseconds()}
+	if requestDuration > 0 {
+		metrics.RequestWallClockTokensPerSecond = float64(outputTokens) / requestDuration.Seconds()
+	}
+	if response.GenerationDuration > 0 {
+		metrics.GenerationDurationMs = response.GenerationDuration.Milliseconds()
+		generationRate := float64(outputTokens) / response.GenerationDuration.Seconds()
+		metrics.OutputTokensPerSecond = &generationRate
+	}
+	return metrics
+}
+
+func roundOutputTokens(ctx context.Context, response model.Response) (int64, usage.Source) {
+	if response.Text == "" && len(response.ToolCalls) == 0 {
+		return 0, usage.SourceEstimate
+	}
+	content, err := json.Marshal(struct {
+		Text      string           `json:"text,omitempty"`
+		ToolCalls []model.ToolCall `json:"tool_calls,omitempty"`
+	}{Text: response.Text, ToolCalls: response.ToolCalls})
+	if err != nil {
+		return 0, usage.SourceUnknown
+	}
+	tokens, err := (usage.ByteEstimator{}).Count(ctx, content)
+	if err != nil {
+		return 0, usage.SourceUnknown
+	}
+	return tokens, usage.SourceEstimate
+}
+
+func cloneTokenCount(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func stepMetricsMessage(metrics usage.StepMetrics) string {
+	return fmt.Sprintf("step=%d context=%d tokens generation_tps=%s request_tps=%.2f output=%d tools=%d tool_latency=%s", metrics.Round, metrics.ContextTokens, optionalRate(metrics.OutputTokensPerSecond), metrics.RequestWallClockTokensPerSecond, metrics.OutputTokens, metrics.ToolCalls, metrics.ToolLatency.Round(time.Microsecond))
+}
+
+func optionalRate(value *float64) string {
+	if value == nil {
+		return "unknown"
+	}
+	return strconv.FormatFloat(*value, 'f', 2, 64)
+}
+
+func (runner *Runner) recordStepMetrics(ctx context.Context, sessionID session.ID, metrics usage.StepMetrics) error {
+	if err := runner.appendEvent(ctx, sessionID, "step_metrics", metrics); err != nil {
+		return err
+	}
+	runner.emit(ProgressEvent{Phase: "metrics", Message: stepMetricsMessage(metrics), Round: metrics.Round})
+	return nil
+}
+
+func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID, response model.Response, totalUsage *usage.Counts, changedPaths []string, changeSets []tools.ChangeSet, validations []session.Validation, first bool, initialUsage usage.Counts, steps []usage.StepMetrics, contextTokensTotal int64) (Outcome, bool, error) {
 	*totalUsage = addResponseUsage(*totalUsage, response.Usage, first, initialUsage)
 	runner.emit(ProgressEvent{Phase: "model", Message: fmt.Sprintf("model response received (%d tool call(s))", len(response.ToolCalls))})
 	if err := runner.appendEvent(ctx, sessionID, "model_message", response); err != nil {
@@ -199,7 +332,7 @@ func (runner *Runner) processResponse(ctx context.Context, sessionID session.ID,
 		return Outcome{SessionID: sessionID, Usage: *totalUsage}, false, nil
 	}
 	runner.emit(ProgressEvent{Phase: "model", Message: "finished composing public response"})
-	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
+	outcome := Outcome{SessionID: sessionID, Text: response.Text, Usage: *totalUsage, Steps: append([]usage.StepMetrics(nil), steps...), StepSummary: usage.SummarizeSteps(steps), ContextTokensTotal: contextTokensTotal, ChangedPaths: append([]string(nil), changedPaths...), ChangeSets: append([]tools.ChangeSet(nil), changeSets...), Validations: append([]session.Validation(nil), validations...)}
 	if err := runner.completeSession(ctx, sessionID, outcome); err != nil {
 		return outcome, false, err
 	}
@@ -229,24 +362,56 @@ func (runner *Runner) createModelResponse(ctx context.Context, request model.Req
 }
 
 func (runner *Runner) createStreamingResponse(ctx context.Context, client model.StreamingModelClient, request model.Request) (model.Response, error) {
-	announced := false
-	response, err := client.CreateStream(ctx, request, func(event model.StreamEvent) error {
-		if runner.Verbose && event.Type != "" {
-			runner.emit(ProgressEvent{Phase: "model", Message: "stream event " + event.Type})
-		}
-		if event.Text != "" && !announced {
-			runner.emit(ProgressEvent{Phase: "model", Message: "composing public response"})
-			announced = true
-		}
-		if runner.Verbose && event.Text != "" {
-			runner.emit(ProgressEvent{Phase: "model", Message: "public model text: " + publicTextPreview(event.Text)})
-		}
-		return nil
-	})
-	if err == nil || !streamingFallbackAllowed(ctx, err) {
+	timing := streamTiming{runner: runner}
+	response, err := client.CreateStream(ctx, request, timing.handle)
+	if err == nil {
+		response.GenerationDuration = timing.duration
+		return response, nil
+	}
+	if !streamingFallbackAllowed(ctx, err) {
 		return response, err
 	}
 	return runner.Client.Create(ctx, request)
+}
+
+type streamTiming struct {
+	runner      *Runner
+	firstOutput time.Time
+	duration    time.Duration
+}
+
+func (timing *streamTiming) handle(event model.StreamEvent) error {
+	now := time.Now()
+	if timing.runner.Verbose && event.Type != "" {
+		timing.runner.emit(ProgressEvent{Phase: "model", Message: "stream event " + event.Type})
+	}
+	timing.noteOutput(event, now)
+	if isTerminalStreamEvent(event.Type) && !timing.firstOutput.IsZero() {
+		timing.duration = now.Sub(timing.firstOutput)
+	}
+	return nil
+}
+
+func (timing *streamTiming) noteOutput(event model.StreamEvent, now time.Time) {
+	if event.Text == "" {
+		return
+	}
+	if timing.firstOutput.IsZero() {
+		timing.firstOutput = now
+		timing.runner.emit(ProgressEvent{Phase: "model", Message: "composing public response"})
+	}
+	if timing.runner.Verbose {
+		timing.runner.emit(ProgressEvent{Phase: "model", Message: "public model text: " + publicTextPreview(event.Text)})
+	}
+}
+
+func isTerminalStreamEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete", "response.cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func verboseResponseMessage(response model.Response) string {
@@ -285,7 +450,17 @@ func (runner *Runner) buildRequest(ctx context.Context, task Task, previous *ses
 	for _, definition := range definitions {
 		modelTools = append(modelTools, model.ToolDefinition{Type: "function", Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters})
 	}
-	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+	modelTools = append(modelTools, thinkingEffortToolDefinition())
+	return runner.Context.Build(ctx, contextdata.Request{Model: task.Model, ThinkingEffort: task.ThinkingEffort, Policy: task.ContextPolicy, UserInput: task.Request, Instructions: task.Instructions, History: resumeHistory(previous), Paths: task.Paths, Tools: modelTools, MaxInputTokens: task.MaxInputTokens, MaxOutputTokens: task.MaxOutputTokens})
+}
+
+func thinkingEffortToolDefinition() model.ToolDefinition {
+	return model.ToolDefinition{
+		Type:        "function",
+		Name:        thinkingEffortToolName,
+		Description: "Set the reasoning effort for the next model round only. Use low for routine steps; request medium or high only when the next step requires substantial synthesis or careful planning.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"effort":{"type":"string","enum":["low","medium","high"]},"reason":{"type":"string","maxLength":240}},"required":["effort"],"additionalProperties":false}`),
+	}
 }
 
 func resumeHistory(record *session.Record) []model.InputItem {
@@ -300,7 +475,8 @@ func resumeHistory(record *session.Record) []model.InputItem {
 	for _, event := range record.Events[requestIndex+1:] {
 		history, pending = replayEvent(history, pending, event)
 	}
-	return sanitizeHistory(removePendingCalls(history, pending))
+	history = sanitizeHistory(removePendingCalls(history, pending))
+	return compactResumeHistory(history)
 }
 
 func previousSummary(record *session.Record) []model.InputItem {
@@ -325,8 +501,9 @@ func replayModelMessage(history []model.InputItem, pending []pendingCall, data j
 	if json.Unmarshal(data, &response) != nil {
 		return history, pending
 	}
-	if response.Text != "" {
-		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: response.Text})
+	publicText := model.StripToolArgumentEchoes(response.Text, response.ToolCalls)
+	if publicText != "" {
+		history = append(history, model.InputItem{Type: "message", Role: "assistant", Content: publicText})
 	}
 	for _, call := range response.ToolCalls {
 		pending = append(pending, pendingCall{index: len(history), callID: call.CallID})
@@ -414,20 +591,31 @@ func sanitizeHistory(history []model.InputItem) []model.InputItem {
 	return result
 }
 
-func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCalls(ctx context.Context, sessionID session.ID, request *model.Request, calls []model.ToolCall, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	for _, call := range calls {
-		if err := runner.handleToolCall(ctx, sessionID, request, call, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation); err != nil {
+		if err := runner.handleToolCall(ctx, sessionID, request, call, step, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
+	if step != nil {
+		step.ToolCalls++
+	}
+	runner.traceToolCall(call)
+	if call.Name == thinkingEffortToolName {
+		return runner.handleThinkingEffortCall(ctx, sessionID, request, call, step)
+	}
 	tool, exists := runner.Tools.Lookup(call.Name)
 	if !exists {
 		return apperr.New(apperr.KindTool, "agent.tool", "model requested unknown tool: "+call.Name)
 	}
+	return runner.handleRegisteredToolCall(ctx, sessionID, request, call, tool, step, changedPaths, changeSets, validations, nonInteractive, workspaceAutomation)
+}
+
+func (runner *Runner) handleRegisteredToolCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, tool tools.Tool, step *usage.StepMetrics, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation, nonInteractive bool, workspaceAutomation bool) error {
 	runner.emit(ProgressEvent{Phase: "tool", Message: "tool requested: " + call.Name, Tool: call.Name})
 	decision, err := runner.toolDecision(ctx, tool.Definition(), call, nonInteractive, workspaceAutomation)
 	if err != nil {
@@ -435,21 +623,38 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 	}
 	toolResult := tools.Result{Status: tools.StatusDenied, Diagnostics: []tools.Diagnostic{{Level: "warning", Message: "tool call denied by policy"}}}
 	if decision == policy.DecisionAllow {
-		toolContext := session.WithActiveID(ctx, sessionID)
-		toolResult = tool.Execute(toolContext, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
-		if toolResult.ChangeSet != nil {
-			toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
+		toolResult = runner.executeRegisteredTool(ctx, sessionID, call, tool, workspaceAutomation, nonInteractive)
+		if step != nil {
+			step.ToolLatency += toolResult.Duration
 		}
-		*changedPaths = appendUniquePaths(*changedPaths, toolResult.ChangedPaths)
-		if toolResult.ChangeSet != nil {
-			*changeSets = appendUniqueChangeSets(*changeSets, *toolResult.ChangeSet)
-		}
-		if call.Name == "process.run" {
-			if validation, ok := validationFromResult(toolResult.Data); ok {
-				*validations = append(*validations, validation)
-			}
+		runner.recordToolEvidence(call.Name, toolResult, changedPaths, changeSets, validations)
+	}
+	return runner.appendToolResult(ctx, sessionID, request, call, toolResult)
+}
+
+func (runner *Runner) executeRegisteredTool(ctx context.Context, sessionID session.ID, call model.ToolCall, tool tools.Tool, workspaceAutomation, nonInteractive bool) tools.Result {
+	toolContext := session.WithActiveID(ctx, sessionID)
+	toolResult := tool.Execute(toolContext, tools.Call{Name: call.Name, Arguments: json.RawMessage(call.Arguments)})
+	if toolResult.ChangeSet != nil {
+		toolResult.ChangeSet.Approval = approvalIdentity(workspaceAutomation, nonInteractive)
+	}
+	return toolResult
+}
+
+func (runner *Runner) recordToolEvidence(name string, result tools.Result, changedPaths *[]string, changeSets *[]tools.ChangeSet, validations *[]session.Validation) {
+	*changedPaths = appendUniquePaths(*changedPaths, result.ChangedPaths)
+	if result.ChangeSet != nil {
+		*changeSets = appendUniqueChangeSets(*changeSets, *result.ChangeSet)
+	}
+	if name == "process.run" {
+		if validation, ok := validationFromResult(result.Data); ok {
+			*validations = append(*validations, validation)
 		}
 	}
+}
+
+func (runner *Runner) appendToolResult(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, toolResult tools.Result) error {
+	runner.traceToolResult(call, toolResult)
 	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
 		return err
 	}
@@ -459,10 +664,69 @@ func (runner *Runner) handleToolCall(ctx context.Context, sessionID session.ID, 
 		return err
 	}
 	request.Input = append(request.Input,
-		model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments},
-		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult)},
+		model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments, ContextPriority: model.ContextPriorityRecent},
+		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult), ContextPriority: model.ContextPriorityRecent},
 	)
 	return nil
+}
+
+func (runner *Runner) traceToolCall(call model.ToolCall) {
+	if runner.DebugLogger != nil {
+		runner.DebugLogger.Debug("raw_tool_call", slog.String("name", call.Name), slog.String("call_id", call.CallID), slog.String("arguments", call.Arguments))
+	}
+}
+
+func (runner *Runner) traceToolResult(call model.ToolCall, result tools.Result) {
+	if runner.DebugLogger == nil {
+		return
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		runner.DebugLogger.Debug("raw_tool_result_encode_error", slog.String("name", call.Name), slog.String("error", err.Error()))
+		return
+	}
+	runner.DebugLogger.Debug("raw_tool_result", slog.String("name", call.Name), slog.String("call_id", call.CallID), slog.String("result", string(encoded)))
+}
+
+func (runner *Runner) handleThinkingEffortCall(ctx context.Context, sessionID session.ID, request *model.Request, call model.ToolCall, step *usage.StepMetrics) error {
+	started := time.Now()
+	var arguments struct {
+		Effort string `json:"effort"`
+		Reason string `json:"reason,omitempty"`
+	}
+	if step != nil {
+		step.ToolLatency += time.Since(started)
+	}
+	toolResult := tools.Result{Status: tools.StatusSucceeded, Data: map[string]string{"applies": "next model round"}}
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil || !validThinkingEffort(arguments.Effort) {
+		toolResult = tools.Result{Status: tools.StatusFailed, Diagnostics: []tools.Diagnostic{{Level: "error", Code: "invalid_arguments", Message: "effort must be one of: low, medium, high", NextAction: "retry with a supported effort value"}}}
+	} else {
+		request.ThinkingEffort = arguments.Effort
+		toolResult.Data = map[string]string{"effort": arguments.Effort, "applies": "next model round"}
+	}
+	runner.traceToolResult(call, toolResult)
+	if err := runner.appendEvent(ctx, sessionID, "tool_result", toolResult); err != nil {
+		return err
+	}
+	runner.emit(ProgressEvent{Phase: "tool", Message: "thinking effort request " + string(toolResult.Status), Tool: call.Name})
+	encodedResult, err := json.Marshal(toolResult)
+	if err != nil {
+		return err
+	}
+	request.Input = append(request.Input,
+		model.InputItem{Type: "function_call", CallID: call.CallID, Name: call.Name, Arguments: call.Arguments, ContextPriority: model.ContextPriorityRecent},
+		model.InputItem{Type: "function_call_output", CallID: call.CallID, Output: string(encodedResult), ContextPriority: model.ContextPriorityRecent},
+	)
+	return nil
+}
+
+func validThinkingEffort(effort string) bool {
+	switch effort {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func approvalIdentity(workspaceAutomation, nonInteractive bool) string {
@@ -557,7 +821,7 @@ func (runner *Runner) appendEvent(ctx context.Context, id session.ID, eventType 
 }
 
 func (runner *Runner) completeSession(ctx context.Context, id session.ID, outcome Outcome) error {
-	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, ChangeSets: outcome.ChangeSets, Validations: outcome.Validations, Usage: outcome.Usage})
+	return runner.Sessions.Complete(ctx, id, session.Result{Summary: outcome.Text, ChangedPaths: outcome.ChangedPaths, ChangeSets: outcome.ChangeSets, Validations: outcome.Validations, Usage: outcome.Usage, Steps: outcome.Steps, StepSummary: outcome.StepSummary, ContextTokensTotal: outcome.ContextTokensTotal})
 }
 
 func (runner *Runner) failSession(ctx context.Context, id session.ID, err error) error {

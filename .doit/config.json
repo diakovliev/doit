@@ -1,5 +1,5 @@
 {
-  "default_profile": "foundry_gpt",
+  "default_profile": "ollama",
   "profiles": {
     "lmstudio": {
       "api_root": "http://localhost:1234/v1",
@@ -7,7 +7,16 @@
     },
     "ollama": {
       "api_root": "http://127.0.0.1:11434/v1",
-      "model": "phi4-mini:latest"
+      "____model": "gemma4:31b-mlx",
+      "__model": "qwen3.8:27b-mlx",
+      "_model": "qwen3-coder:30b",
+      "model": "pdurlej/gemma-4-26B-A4B-it-heretic",
+      "streaming": true,
+      "thinking_effort": "medium",
+      "token": {
+        "max_input_tokens": 48000,
+        "max_output_tokens": 48000
+      }
     },
     "foundry_deepseek": {
       "api_root": "https://daemondeveloperfoundry.services.ai.azure.com/openai/v1",

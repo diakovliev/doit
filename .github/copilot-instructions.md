@@ -26,6 +26,10 @@
 ## Validation
 
 - After source changes, run the repository-configured check, format, lint, and security tasks.
+- `go test ./...` is a blocking quality gate. A change is not complete while any package test fails or the full suite has not been run after the final edits.
+- `golangci-lint run ./...` is a blocking quality gate. A change is not complete while lint reports any finding, even when tests pass.
+- Run `gofmt` on changed Go files before linting, then fix lint findings at the implementation or test boundary; do not disable, exclude, or weaken a linter to make the gate pass unless explicitly requested.
+- Report both `go test ./...` and `golangci-lint run ./...` with their results in the work summary. If either tool is unavailable, report validation as incomplete rather than claiming the gate passed.
 - Fix validation and security findings in the implementation; do not silence findings with disable directives unless explicitly requested.
 - Add or update focused tests when behavior changes.
 

@@ -30,6 +30,18 @@ func TestHistoryFiltersPublicEventsAndUsesCursorBounds(t *testing.T) {
 	}
 }
 
+func TestHistoryIncludesSearchableConciseSummary(t *testing.T) {
+	store, id := newHistoryTestStore(t)
+	appendHistoryEvent(t, store, id, "model_message", `{"status":"completed","text":"The module validation passed.","tool_calls":[]}`)
+	result, err := store.History(context.Background(), id, HistoryQuery{Query: "module validation", MaxEvents: 5, MaxBytes: 4096})
+	if err != nil || len(result.Events) != 1 {
+		t.Fatalf("search by history summary failed: %+v, error=%v", result, err)
+	}
+	if !strings.Contains(result.Events[0].Summary, "status=completed") || !strings.Contains(result.Events[0].Summary, "module validation passed") {
+		t.Fatalf("history summary omitted public event details: %+v", result.Events[0])
+	}
+}
+
 func TestHistoryBoundsResultsAndRequiresActiveSession(t *testing.T) {
 	store, id := newHistoryTestStore(t)
 	appendHistoryEvent(t, store, id, "model_message", `{"text":"one"}`)

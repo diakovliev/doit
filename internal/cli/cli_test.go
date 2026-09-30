@@ -25,11 +25,11 @@ func (handler *testHandler) Agent(_ context.Context, invocation Invocation, _ io
 }
 
 func TestParseRunOptions(t *testing.T) {
-	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "-p", "local", "-m", "test-model", "--ephemeral", "--new-session", "--timeout", "2s", "run", "inspect", "files"})
+	invocation, err := Parse([]string{"-C", "workspace", "--format", "json", "-p", "local", "-m", "test-model", "--thinking-effort", "high", "--debug", "--ephemeral", "--new-session", "--timeout", "2s", "run", "inspect", "files"})
 	if err != nil {
 		t.Fatalf("parse invocation: %v", err)
 	}
-	expected := Invocation{Command: "run", Arguments: []string{"inspect", "files"}, Request: "inspect files", Directory: "workspace", Profile: "local", Model: "test-model", Format: "json", Timeout: 2 * time.Second, Ephemeral: true, NewSession: true}
+	expected := Invocation{Command: "run", Arguments: []string{"inspect", "files"}, Request: "inspect files", Directory: "workspace", Profile: "local", Model: "test-model", ThinkingEffort: "high", Format: "json", Timeout: 2 * time.Second, Ephemeral: true, NewSession: true, Debug: true}
 	if !reflect.DeepEqual(invocation, expected) {
 		t.Fatalf("unexpected invocation: %+v", invocation)
 	}
@@ -42,6 +42,28 @@ func TestParseNoResumeAliasStartsFreshSession(t *testing.T) {
 	}
 	if !invocation.NewSession {
 		t.Fatal("expected no-resume to request a new session")
+	}
+}
+
+func TestParseGlobalInit(t *testing.T) {
+	for _, args := range [][]string{{"init", "--global"}, {"--global", "init"}} {
+		invocation, err := Parse(args)
+		if err != nil {
+			t.Fatalf("parse global init %v: %v", args, err)
+		}
+		if !invocation.GlobalInit || invocation.Command != "init" {
+			t.Fatalf("unexpected global init invocation: %+v", invocation)
+		}
+	}
+}
+
+func TestParseMarkdownFormatAlias(t *testing.T) {
+	invocation, err := Parse([]string{"--format", "md", "session", "inspect"})
+	if err != nil {
+		t.Fatalf("parse markdown format: %v", err)
+	}
+	if invocation.Format != "markdown" {
+		t.Fatalf("expected normalized markdown format, got %q", invocation.Format)
 	}
 }
 

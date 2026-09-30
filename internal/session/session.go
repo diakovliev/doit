@@ -60,6 +60,7 @@ type HistoryEvent struct {
 	Sequence  uint64          `json:"sequence"`
 	Timestamp time.Time       `json:"timestamp"`
 	Type      string          `json:"type"`
+	Summary   string          `json:"summary,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 
@@ -85,12 +86,15 @@ type Validation struct {
 
 // Result is the final redacted session summary.
 type Result struct {
-	Summary      string            `json:"summary"`
-	ChangedPaths []string          `json:"changed_paths,omitempty"`
-	ChangeSets   []tools.ChangeSet `json:"change_sets,omitempty"`
-	Validations  []Validation      `json:"validations,omitempty"`
-	Unresolved   []string          `json:"unresolved,omitempty"`
-	Usage        usage.Counts      `json:"usage"`
+	Summary            string              `json:"summary"`
+	ChangedPaths       []string            `json:"changed_paths,omitempty"`
+	ChangeSets         []tools.ChangeSet   `json:"change_sets,omitempty"`
+	Validations        []Validation        `json:"validations,omitempty"`
+	Unresolved         []string            `json:"unresolved,omitempty"`
+	Usage              usage.Counts        `json:"usage"`
+	Steps              []usage.StepMetrics `json:"steps,omitempty"`
+	StepSummary        usage.StepSummary   `json:"step_summary,omitempty"`
+	ContextTokensTotal int64               `json:"context_tokens_total,omitempty"`
 }
 
 // Record contains the metadata, events, and optional completion result.

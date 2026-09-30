@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"time"
 
 	"github.com/diakovliev/doit/internal/apperr"
 	"github.com/diakovliev/doit/internal/usage"
@@ -12,14 +13,25 @@ import (
 
 // InputItem is a normalized Responses API input item.
 type InputItem struct {
-	Type      string `json:"type"`
-	Role      string `json:"role,omitempty"`
-	Content   string `json:"content,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Output    string `json:"output,omitempty"`
+	Type            string `json:"type"`
+	Role            string `json:"role,omitempty"`
+	Content         string `json:"content,omitempty"`
+	CallID          string `json:"call_id,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Arguments       string `json:"arguments,omitempty"`
+	Output          string `json:"output,omitempty"`
+	ContextPriority int    `json:"-"`
 }
+
+const (
+	ContextPriorityAutomatic = iota
+	ContextPriorityHistory
+	ContextPriorityMemory
+	ContextPriorityRecent
+	ContextPriorityRollingMemory
+	ContextPrioritySelected
+	ContextPriorityCurrent
+)
 
 // ToolDefinition describes a function the model may request.
 type ToolDefinition struct {
@@ -32,6 +44,7 @@ type ToolDefinition struct {
 // Request is the provider-neutral model request contract.
 type Request struct {
 	Model           string           `json:"model"`
+	ThinkingEffort  string           `json:"-"`
 	Instructions    string           `json:"instructions,omitempty"`
 	Input           []InputItem      `json:"input,omitempty"`
 	Tools           []ToolDefinition `json:"tools,omitempty"`
@@ -49,13 +62,14 @@ type ToolCall struct {
 
 // Response is the provider-neutral model response contract.
 type Response struct {
-	ID                string       `json:"id,omitempty"`
-	Status            string       `json:"status"`
-	Text              string       `json:"text,omitempty"`
-	ToolCalls         []ToolCall   `json:"tool_calls,omitempty"`
-	Usage             usage.Counts `json:"usage"`
-	RequestID         string       `json:"request_id,omitempty"`
-	ProviderRequestID string       `json:"provider_request_id,omitempty"`
+	ID                 string        `json:"id,omitempty"`
+	Status             string        `json:"status"`
+	Text               string        `json:"text,omitempty"`
+	ToolCalls          []ToolCall    `json:"tool_calls,omitempty"`
+	Usage              usage.Counts  `json:"usage"`
+	RequestID          string        `json:"request_id,omitempty"`
+	ProviderRequestID  string        `json:"provider_request_id,omitempty"`
+	GenerationDuration time.Duration `json:"-"`
 }
 
 // StreamEvent is one normalized event emitted while a model response streams.

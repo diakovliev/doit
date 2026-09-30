@@ -41,17 +41,41 @@ var guidanceSkillDirectories = []string{
 	".doit/skills",
 }
 
-func loadRepositoryGuidance(ctx stdcontext.Context, workspace string) string {
+func loadRepositoryGuidance(ctx stdcontext.Context, workspace, globalRoot string) string {
+	globalInstructions, globalSkills := loadGlobalGuidance(ctx, globalRoot)
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
-		return ""
+		return renderGuidance(globalInstructions, globalSkills)
 	}
 	defer func() { _ = root.Close() }()
 
 	instructions := readGuidanceFiles(ctx, root, guidanceInstructionFiles)
 	instructions = append(instructions, readGuidanceFilesFromDirectories(ctx, root, guidanceInstructionDirectories)...)
 	skills := readSkillFiles(ctx, root)
+	instructions = append(globalInstructions, instructions...)
+	skills = append(globalSkills, skills...)
 	return renderGuidance(instructions, skills)
+}
+
+func loadGlobalGuidance(ctx stdcontext.Context, directory string) (instructions, skills []guidanceDocument) {
+	if directory == "" {
+		return nil, nil
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return nil, nil
+	}
+	defer func() { _ = root.Close() }()
+	instructions = readGuidanceFiles(ctx, root, []string{"instructions.md"})
+	instructions = append(instructions, readGuidanceFilesFromDirectories(ctx, root, []guidanceDirectory{{path: "instructions", suffix: ".md"}})...)
+	skills = readSkillFilesFromDirectories(ctx, root, []string{"skills"})
+	for index := range instructions {
+		instructions[index].path = filepath.ToSlash(filepath.Join("~/.doit", instructions[index].path))
+	}
+	for index := range skills {
+		skills[index].path = filepath.ToSlash(filepath.Join("~/.doit", skills[index].path))
+	}
+	return instructions, skills
 }
 
 func readGuidanceFiles(ctx stdcontext.Context, root *os.Root, paths []string) []guidanceDocument {
@@ -88,8 +112,12 @@ func readGuidanceFilesFromDirectories(ctx stdcontext.Context, root *os.Root, dir
 }
 
 func readSkillFiles(ctx stdcontext.Context, root *os.Root) []guidanceDocument {
+	return readSkillFilesFromDirectories(ctx, root, guidanceSkillDirectories)
+}
+
+func readSkillFilesFromDirectories(ctx stdcontext.Context, root *os.Root, directories []string) []guidanceDocument {
 	documents := make([]guidanceDocument, 0)
-	for _, directory := range guidanceSkillDirectories {
+	for _, directory := range directories {
 		entries := readDirectoryEntries(root, directory)
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
