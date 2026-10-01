@@ -7,12 +7,13 @@
     },
     "ollama": {
       "api_root": "http://127.0.0.1:11434/v1",
-      "____model": "gemma4:31b-mlx",
-      "__model": "qwen3.8:27b-mlx",
-      "_model": "qwen3-coder:30b",
-      "model": "pdurlej/gemma-4-26B-A4B-it-heretic",
+      "model4": "gemma4:31b-mlx",
+      "model3": "qwen3.8:27b-mlx",
+      "model2": "qwen3-coder:30b",
+      "model1": "pdurlej/gemma-4-26B-A4B-it-heretic",
+      "model": "command-r:35b",
       "streaming": true,
-      "thinking_effort": "medium",
+      "_thinking_effort": "medium",
       "token": {
         "max_input_tokens": 48000,
         "max_output_tokens": 48000
